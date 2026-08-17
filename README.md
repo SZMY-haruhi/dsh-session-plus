@@ -2,7 +2,7 @@
 
 中文 | [English](README.en.md)
 
-[awesome · DSH plugin](https://awesome-dsh-plugin.com) [推荐 dshfind](https://dshfind.com/zh/plugins/SZMY-haruhi/dsh-session-plus?ref=badge)
+[![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com) [![推荐 dshfind](https://img.shields.io/badge/%E6%8E%A8%E8%8D%90-dshfind-ffd700?labelColor=555555)](https://dshfind.com/zh/plugins/SZMY-haruhi/dsh-session-plus?ref=badge)
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的会话补全：侧栏归档目录、恢复到原位置、删除、分支对话。
 
@@ -181,6 +181,10 @@ dsh plugin --profile web add .
 ---
 
 ## Author
+
+<a href="https://tonkatsu258.vercel.app/index.html">
+  <img src="docs/avatar.png" width="96" height="96" alt="tonkatsu258" />
+</a>
 
 **感谢star❤️**
 **[tonkatsu258](https://tonkatsu258.vercel.app/index.html)** · [个人网站](https://tonkatsu258.vercel.app/index.html)

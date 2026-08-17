@@ -10,6 +10,10 @@ Stock DSH can already archive a session, but it has no UI to list, unarchive, or
 
 Open **Archive** next to Settings at the bottom of the sidebar.
 
+<p align="center">
+  <img src="docs/archive-button.png" alt="Sidebar footer: Archive above Settings" width="240" />
+</p>
+
 ## Known failure (read this first)
 
 This is not a one-version regression. I reproduced it across multiple builds of this plugin, and other community archive plugins hit the same class of bug. The root cause is DSH session persistence: `tool` / `result` events must carry `source.kind = tool` and a `callId`. Archiving while a tool call is still in flight (the host will `clear()` / unbind) can write an illegal event. A log that is already corrupt cannot be repaired by this plugin — delete it.
@@ -39,6 +43,40 @@ SessionPersistenceCorruptionError: ... message must have tool source（internal�
 
 So: **do not archive while a tool is still running.** Wait for the turn to finish, or stop it first. A blank “New session” cannot be archived anyway. The plugin tries to wait until idle (including `runningCalls` / `partial`, up to about 30 seconds) before archive; on timeout it tells you to wait or stop. That does not cover every timing. If the log is already broken, restore is useless — just delete that session.
 
+## Install
+
+npm (stable, [official recommendation](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish)). Please take **0.1.1** — the npm `0.1.0` was only a name-hold, not this codebase.
+
+```sh
+dsh plugin --profile web add dsh-session-plus
+```
+
+Already on 0.1.0:
+
+```sh
+dsh plugin --profile web update dsh-session-plus
+```
+
+Or follow GitHub (latest commit; this package ships prebuilt `lib/`, so git install does not need `allowBuilds`):
+
+```sh
+dsh plugin --profile web add github:SZMY-haruhi/dsh-session-plus
+```
+
+Pin a commit:
+
+```sh
+dsh plugin --profile web add github:SZMY-haruhi/dsh-session-plus#<commit>
+```
+
+Remove:
+
+```sh
+dsh plugin --profile web remove dsh-session-plus
+```
+
+> `dsh.bundle` · prebuilt `lib/` · git install does not need `allowBuilds`
+
 ## Features
 
 - Archive directory: the official `archivedSessionIds` set, not a shadow list I invented
@@ -48,6 +86,22 @@ So: **do not archive while a tool is still running.** Wait for the turn to finis
 - Blank New session: no archive, no delete
 - Branch conversation: Y-fork-with-arrows icon beside your message (not the official git-branch dots) → nearby popover to edit the prompt, optional new title, empty falls back to official `increaseTitle` `(1)` `(2)` → `sessions.fork` then send; the old session stays
 - One entry, one operation surface; I am not building a settings-page session OS (export, pause, compaction, AI rename)
+
+**Restore** / **Delete** in the archive directory:
+
+<p align="center">
+  <img src="docs/delete.gif" alt="Archive directory: delete a session from the list" width="720" />
+</p>
+
+**Edit and branch** beside your message: nearby popover to change the prompt, optional new title, original conversation stays.
+
+<p align="center">
+  <img src="docs/branch-edit.png" alt="Edit-and-branch popover: title optional, defaults to (1) (2)" width="480" />
+</p>
+
+<p align="center">
+  <img src="docs/edit-and-branch.gif" alt="Open Edit and branch from a user message" width="720" />
+</p>
 
 ## Behavior
 
@@ -65,50 +119,25 @@ So: **do not archive while a tool is still running.** Wait for the turn to finis
 - No injection into the native View options menu
 - No repair of already-corrupt session logs (that belongs to host persistence)
 
-## Install
-
-npm (stable, [official recommendation](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish)):
-
-```sh
-dsh plugin --profile web add dsh-session-plus
-dsh web
-```
-
-Or follow GitHub (latest commit; this package ships prebuilt `lib/`, so git install does not need `allowBuilds`):
-
-```sh
-dsh plugin --profile web add github:SZMY-haruhi/dsh-session-plus
-dsh web
-```
-
-Pin a commit:
-
-```sh
-dsh plugin --profile web add github:SZMY-haruhi/dsh-session-plus#<commit>
-```
-
-Remove:
-
-```sh
-dsh plugin --profile web remove dsh-session-plus
-```
-
-> `dsh.bundle` · prebuilt `lib/` · git install does not need `allowBuilds`
-
 ## Develop from source
 
 ```sh
 pnpm install
 pnpm build
 dsh plugin --profile web add .
-dsh web
 ```
 
-`pnpm pack` builds the same tarball npm would publish. Install with `dsh plugin --profile web add ./dsh-session-plus-0.1.0.tgz`.
+`pnpm pack` builds the tarball I would send to npm. Install this cut with `dsh plugin --profile web add ./dsh-session-plus-0.1.1.tgz`.
 
 ## Changelog
 
+### 0.1.1 · 2026-08-18
+
+Publish this GitHub cut to npm. The npm `0.1.0` was only a name-hold and cannot be overwritten, so this is `0.1.1`.
+
 ### 0.1.0 · 2026-08-18 · first release
+
+This cut was GitHub `main` at the time. The npm `0.1.0` with the same number is only the earlier name-hold stub; they are not the same code.
 
 This is the first working cut of “session completion.” This version ships:
 
@@ -123,6 +152,10 @@ This is the first working cut of “session completion.” This version ships:
 - Public Harness APIs only — no `@deepseek-ai` patches, no View-options DOM injection
 
 See “Known failure” above. Scene 3 is a host log constraint, not a regression unique to this cut.
+
+## Voice input
+
+Official DSH has no speech-to-text. The voice plugins I tried were fiddly to set up and awkward in use, so I wrote [otoink](https://github.com/SZMY-haruhi/otoink) — cross-window dictation with a built-in engine.
 
 ## Acknowledgements
 

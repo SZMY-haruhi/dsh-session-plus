@@ -1,0 +1,23 @@
+This plugin is original code. It does not copy other DSH plugins.
+
+Official contracts used (DeepSeek Harness / Cordis):
+
+- Bundle manifest: package.json `dsh.bundle.patch` → `cordis.patch.yml`
+- Patch row: unique `id` + npm `name` (plugin insert, no @deepseek-ai override)
+- Host: `export const name` / `export const inject` / `export function apply`
+- Client: `dsh.client` + public slots (`sidebar.footer.action`, `shell.overlay`,
+  `conversation.chat.node`)
+- Archive set: workspace domain `archivedSessionIds` (unarchive restores the
+  existing workspace `sessionIds` slot; official archive never removes it)
+- Branch conversation: public `sessions.fork` then `prompt` (append-only log)
+
+The following MIT projects were read as design references. Ideas only; their
+copyright remains with their authors:
+
+- cokiscarazo-rgb/dsh-session-management
+- Moeblack/dsh-message-edit
+- cindyguyuehu123/dsh-webchatlike (interaction model only; this plugin does
+  not patch `@deepseek-ai` packages)
+- dylan121322/dsh-session-unarchive (restore-to-original-slot idea only)
+
+Do not treat repositories without a LICENSE file as copyable source.

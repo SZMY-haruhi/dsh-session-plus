@@ -1,0 +1,8 @@
+# dsh bundle patch.
+# Official shape: a YAML array of insert/override rows. `id` is unique in the
+# composed plugin tree; `name` is the npm package so Node resolves the installed
+# code (https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish).
+# This bundle only inserts — it does not override @deepseek-ai rows.
+- insert:
+    - id: dsh-session-plus
+      name: dsh-session-plus

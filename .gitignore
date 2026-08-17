@@ -1,0 +1,32 @@
+# Local install (do not publish)
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+*.tgz
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# Intermediate client wrap input (published entry is lib/)
+build/
+
+# Secrets
+.env
+.env.*
+!.env.example
+.credentials.yaml
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Local DSH / tooling
+.dsh/
+
+# Local session handoff (do not publish)
+MEMORY.md

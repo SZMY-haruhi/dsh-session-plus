@@ -47,7 +47,7 @@ SessionPersistenceCorruptionError: ... message must have tool source（internal�
 
 ## 安装
 
-npm（稳定版，[官方推荐](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish)）。请装 **0.1.1**：npm 上的 0.1.0 是更早的占名包，不是现在这份。
+npm（稳定版，[官方推荐](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish)）。请装 **0.1.2**。npm 上的 0.1.0 是更早的占名包；0.1.1 还按旧的 `list()` 头对象和 `locate()` 找文件，接不上 DSH 0.1.5 之后的会话日志。
 
 ```sh
 dsh plugin --profile web add dsh-session-plus
@@ -83,8 +83,8 @@ dsh plugin --profile web remove dsh-session-plus
 
 - 归档目录：列出官方 `archivedSessionIds`，不是我自己做的影子列表
 - 恢复：从归档集合拿掉；工作区 `sessionIds` 槽位官方归档时本来就没拆，所以回到原位置
-- 删除：居中二次确认（红色删除），卸工作区记账并删会话日志（含 `.zstd` 兄弟文件、会话目录）；删完不会再取消归档，避免幽灵会话回到列表
-- 删的是当前会话时：`sessions.clear()` 回到空白「新会话」，不会 `connectWorkspace`（那个体感像「返回工作区」）
+- 删除：居中二次确认（红色删除，确认层压在归档面板之上）。卸工作区记账并删掉整个会话目录：v0 `session.jsonl[.zstd]`、0.1.5 起的 `session.v3.jsonl[.zstd]`、以及当前的 `session.v4.jsonl[.zstd]`。子代理（日志头 `origin: "subagent"`）会跟着删；修改并分支产生的 fork 也写 `parentSession`，但不是子代理，留在磁盘上。删完不会再取消归档，避免幽灵会话回到列表
+- 删的是当前会话时：在当前工作区打开一个空白新会话（`uiWorkspace.startSession`）。更早的宿主如果还提供 `sessions.clear()`，就走那个。不会 `connectWorkspace`（那个体感像「返回工作区」）
 - 空白「新会话」：不能归档、不能删除
 - 分支对话：自己消息旁的分叉图标（Y 形带箭头，不是官方 git-branch 那种圆点）→ 就近浮窗改提问，可选填新标题，空则官方 `increaseTitle` 叠 `(1)` `(2)` → `sessions.fork` 再发送；旧会话还在
 - 一个入口、一套操作；设置页大管家（导出、暂停、压缩、AI 重命名）我不做
@@ -112,7 +112,7 @@ dsh plugin --profile web remove dsh-session-plus
 | ---- | ------------------------------------ | ------------------------ |
 | 归档   | 官方 `workspaces.archiveSession`       | 会话从侧栏分组里消失，记账保留          |
 | 恢复   | 写回 workspace 域的 `archivedSessionIds` | 会话出现在原来的工作区位置            |
-| 删除   | 卸记账 + 删 persistence 文件               | 不可恢复                     |
+| 删除   | 卸记账 + 删会话目录（含代际文件和子代理） | 不可恢复；fork 不删          |
 | 分支对话 | `fork` + `prompt`                    | 新会话 = 历史前缀 + 改过的提问 + 新回答 |
 
 
@@ -125,15 +125,37 @@ dsh plugin --profile web remove dsh-session-plus
 
 ## 从源码开发
 
+需要 Node.js >= 22.15。
+
 ```sh
 pnpm install
 pnpm build
 dsh plugin --profile web add .
 ```
 
-`pnpm pack` 可打出准备发给 npm 的 tarball，用 `dsh plugin --profile web add ./dsh-session-plus-0.1.1.tgz` 装这一版。
+`pnpm pack` 可打出准备发给 npm 的 tarball，用 `dsh plugin --profile web add ./dsh-session-plus-0.1.2.tgz` 装这一版。
 
 ## 更新记录
+
+### 0.1.2 · 2026-10-12
+
+适配 DSH 0.1.5 之后的会话持久化，并在 0.2.0-rc.2 上核对过：
+
+- `sessionPersistence.list()` 返回 `{ header, revision, eventCount?, sizeBytes? }`，不再把日志头当数组元素
+- 本插件不调用 `locate()`。0.2.0-rc.2 里它不在公开的 `SessionPersistence` 上。删除只认 JSONL 目录布局，并删掉整个会话目录
+- 删除父会话时级联删除 `origin: "subagent"` 的子会话；fork 不删
+- 四个接口注册在 `ctx.connection.fetch` 的精确路径上，先走 `/api` 的 Host/Origin 和登录校验。未登录是 401
+- 确认框先向 `GET /api/session-plus/delete-preview` 要子代理 id。删除请求把这份 id 带回去，对不上就 409，不删
+- 计划里的目录缺失时返回 404，不会先归档再报成功
+- `ctx.sessions` 里还握着计划删除的任何一个 id 时，删除返回 409，不关 handle，也不删目录。正在跑的会话同样是 409
+- 归档列表的名字先用客户端会话列表里的持久 `title`，没有再用接口带回的 `session/title`，最后才是 `displayTitle`。这个顺序来自 [Hsia97](https://github.com/Hsia97) 的 PR #1。宿主用一次 `sessionQuery.readTitleSnapshots` 取回这些标题。归档不会把会话从客户端 `byId` 里拿掉
+- 确认框的层叠高于归档面板；侧栏按钮不再用负外边距撑出脚栏
+- 订阅 workspace / session 列表时保留 `getSnapshot` 的 `this`
+- 需要 Node.js >= 22.15（`zstdDecompressSync`）。更早的 22 会明确失败，而不是归档成功却留下日志
+
+级联删除和「不要把 fork 当成子代理」里，列表解包的方向来自 [Hsia97](https://github.com/Hsia97) 的 PR #1。那一版按任意 `parentSession` 级联，而且只处理 `session.v3.jsonl.zstd`。这一版只删 `origin: "subagent"`，并删整个会话目录。
+
+删掉子代理之后，它自己的 fork（只写了 `parentSession`）会留在磁盘上，父 id 已经不在，变成孤儿。删除做到一半失败时不会把已经删掉的目录加回来。动手前会把计划删除的 id 列表写进日志。
 
 ### 0.1.1 · 2026-08-18
 
@@ -169,6 +191,8 @@ dsh plugin --profile web add .
 - [Moeblack/dsh-message-edit](https://github.com/Moeblack/dsh-message-edit)
 - [cindyguyuehu123/dsh-webchatlike](https://github.com/cindyguyuehu123/dsh-webchatlike)（交互模型；本插件不补丁核心包）
 - [dylan121322/dsh-session-unarchive](https://github.com/dylan121322/dsh-session-unarchive)（恢复到原槽位这个想法）
+
+DSH 0.1.5+ 的列表解包和子代理清理，方向来自 [Hsia97](https://github.com/Hsia97) 的 [PR #1](https://github.com/SZMY-haruhi/dsh-session-plus/pull/1)。
 
 没有 LICENSE 的仓库，我不当成可复制源码。公开契约见本仓库 `NOTICE`。
 

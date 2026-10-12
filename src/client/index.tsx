@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
 type ArchivedRow = {
   id: string
   cwd?: string
+  title?: string
   live: boolean
   running: boolean
 }
@@ -25,10 +26,10 @@ type PanelState = {
 type Translate = (key: string, params?: Record<string, unknown>) => string
 
 const CSS = [
-  '.sp_btn{box-sizing:border-box;appearance:none;border:0;background:transparent;font:inherit;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);cursor:pointer;display:flex;align-items:center;gap:8px;flex:none;width:calc(100% + 4px);height:42px;margin:4px -2px;padding:0 10px 0 8px;border-radius:12px;overflow:hidden}',
+  '.sp_btn{box-sizing:border-box;appearance:none;border:0;background:transparent;font:inherit;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);cursor:pointer;display:flex;align-items:center;gap:8px;flex:none;width:100%;height:38px;margin:0;padding:0 10px;border-radius:10px;overflow:hidden}',
   '.sp_btn:hover{background:var(--dsw-alias-interactive-bg-hover)}',
   '.sp_btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
-  '.sp_btnRail{border-radius:50%;justify-content:center;gap:0;width:36px;height:36px;margin:8px 0 10px;padding:0}',
+  '.sp_btnRail{border-radius:50%;justify-content:center;gap:0;width:36px;height:36px;margin:0 auto;padding:0}',
   '.sp_btnRail .sp_icon{width:18px;height:18px}',
   '.sp_icon{width:16px;height:16px;flex:none}',
   '.sp_label{white-space:nowrap;overflow:hidden;font-size:14px;line-height:22px;color:inherit}',
@@ -43,7 +44,7 @@ const CSS = [
   '.sp_branchPop{position:absolute;right:0;bottom:calc(100% + 6px);z-index:20;width:min(320px,calc(100vw - 48px));display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3);box-shadow:0 12px 32px rgba(0,0,0,.28)}',
   '.sp_branchPop .sp_area{min-height:72px;width:100%;box-sizing:border-box}',
   '.sp_branchPop .sp_empty,.sp_branchPop .sp_error{margin:0}',
-  '.sp_layer{position:fixed;inset:0;z-index:40;pointer-events:none}',
+  '.sp_layer{position:fixed;inset:0;z-index:1000;pointer-events:none}',
   '.sp_scrim{position:absolute;inset:0;pointer-events:auto;background:rgba(0,0,0,.24)}',
   '.sp_panel{position:absolute;top:12px;bottom:12px;left:12px;width:min(360px,calc(100vw - 24px));pointer-events:auto;display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3);box-shadow:0 12px 40px rgba(0,0,0,.28);overflow:hidden}',
   '.sp_head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2)}',
@@ -60,7 +61,7 @@ const CSS = [
   '.sp_mini.sp_danger,.sp_mini.sp_danger:hover,.sp_mini.sp_danger:focus,.sp_mini.sp_danger:focus-visible,.sp_mini.sp_danger:disabled{border:1px solid #ef4444 !important;background:#ef4444 !important;background-color:#ef4444 !important;color:#fff !important;filter:none}',
   '.sp_mini.sp_danger:hover,.sp_mini.sp_danger:focus,.sp_mini.sp_danger:focus-visible{border-color:#f87171 !important;background:#f87171 !important;background-color:#f87171 !important}',
   '.sp_mini.sp_danger:disabled{opacity:.55}',
-  '.sp_modalLayer{position:fixed;inset:0;z-index:80;pointer-events:auto;display:flex;align-items:center;justify-content:center}',
+  '.sp_modalLayer{position:fixed;inset:0;z-index:1100;pointer-events:auto;display:flex;align-items:center;justify-content:center}',
   '.sp_modalScrim{position:absolute;inset:0;appearance:none;border:0;padding:0;margin:0;background:rgba(0,0,0,.48);cursor:default}',
   '.sp_modal{position:relative;z-index:1;width:min(400px,calc(100vw - 48px));display:flex;flex-direction:column;gap:10px;padding:20px 20px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:var(--dsw-alias-bg-layer-3);box-shadow:0 20px 56px rgba(0,0,0,.45)}',
   '.sp_modalName{margin:0;font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary);word-break:break-word}',
@@ -69,6 +70,7 @@ const CSS = [
   '.sp_modalActions .sp_mini{min-height:32px;padding:6px 14px;font-size:13px}',
   '.sp_empty{margin:8px 0;font-size:13px;color:var(--dsw-alias-label-tertiary)}',
   '.sp_error{margin:0 12px 8px;font-size:12px;color:#ef4444}',
+  '.sp_modal .sp_error{margin:0}',
   '.sp_edit{display:flex;flex-direction:column;gap:8px}',
   '.sp_area{min-height:96px;resize:vertical;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}',
   '.sp_input{box-sizing:border-box;width:100%;padding:6px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}',
@@ -86,7 +88,10 @@ const en = {
   blankHint: 'Empty draft — send a message first.',
   restore: 'Restore',
   delete: 'Delete',
-  confirm: 'Delete this session? The log cannot be recovered.',
+  confirm: 'This also deletes {count} sub-agent session(s). The logs cannot be recovered.',
+  confirmLoading: 'Checking how many sub-agent sessions this deletes…',
+  open: 'This session is still open in this process. Close it before deleting.',
+  stale: 'The sub-agent list changed. Close this dialog and try again.',
   cancel: 'Cancel',
   close: 'Close',
   hide: 'Archive',
@@ -109,7 +114,10 @@ const zh = {
   blankHint: '还是空白草稿，没有对话可归档。',
   restore: '恢复',
   delete: '删除',
-  confirm: '确定删除这个会话？日志无法恢复。',
+  confirm: '这会一并删除 {count} 个子代理会话。日志无法恢复。',
+  confirmLoading: '正在统计要删除的子代理会话…',
+  open: '这个会话还在当前进程里打开着，请先关闭再删除。',
+  stale: '子代理列表变了。关掉这个对话框后再试一次。',
   cancel: '取消',
   close: '关闭',
   hide: '归档',
@@ -176,8 +184,31 @@ function createPanelStore(init: PanelState) {
   }
 }
 
-function useStore<T>(store: { getSnapshot: () => T; subscribe: (fn: () => void) => () => void }) {
-  return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+const missingStore = {
+  subscribe(listener: () => void) {
+    void listener
+    return () => {}
+  },
+  getSnapshot() {
+    return undefined
+  },
+}
+
+/**
+ * Call getSnapshot as a method. Passing the unbound function into
+ * useSyncExternalStore drops `this` on controller stores.
+ * The hook itself always runs; a missing store reads as undefined.
+ */
+function useStore<T>(
+  store: { getSnapshot: () => T; subscribe: (fn: () => void) => () => void } | null | undefined,
+): T | undefined {
+  const bound =
+    store && typeof store.subscribe === 'function' && typeof store.getSnapshot === 'function'
+      ? store
+      : missingStore
+  const subscribe = useCallback((onStoreChange: () => void) => bound.subscribe(onStoreChange), [bound])
+  const getSnapshot = useCallback(() => bound.getSnapshot() as T | undefined, [bound])
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
 async function readApi<T>(path: string, init?: RequestInit): Promise<T> {
@@ -198,21 +229,79 @@ async function readApi<T>(path: string, init?: RequestInit): Promise<T> {
   return body
 }
 
-function sessionRow(ctx: any, sessionId: string | undefined) {
-  if (!sessionId) return undefined
-  return ctx.sessions.list.getSnapshot().byId?.[sessionId] as
-    | { displayTitle?: string; title?: string; blank?: boolean }
-    | undefined
+type SessionListSnap = {
+  current?: string
+  ids?: string[]
+  byId?: Record<
+    string,
+    {
+      displayTitle?: string
+      title?: string
+      blank?: boolean
+      running?: boolean
+      retainedBy?: { mainView?: number }
+    }
+  >
 }
 
-function titleOf(ctx: any, sessionId: string, t?: Translate) {
+function sessionList(ctx: any): SessionListSnap | undefined {
+  return ctx.sessions?.list?.getSnapshot?.() as SessionListSnap | undefined
+}
+
+function currentSessionId(list: SessionListSnap | undefined): string | undefined {
+  if (!list) return undefined
+  if (typeof list.current === 'string' && list.current.length > 0) return list.current
+  const byId = list.byId ?? {}
+  const ids = list.ids ?? Object.keys(byId)
+  for (const id of ids) {
+    if ((byId[id]?.retainedBy?.mainView ?? 0) > 0) return id
+  }
+  for (const [id, row] of Object.entries(byId)) {
+    if ((row?.retainedBy?.mainView ?? 0) > 0) return id
+  }
+  return undefined
+}
+
+function sessionRow(ctx: any, sessionId: string | undefined) {
+  if (!sessionId) return undefined
+  return sessionList(ctx)?.byId?.[sessionId]
+}
+
+function presentTitle(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  return text.length > 0 ? text : undefined
+}
+
+function titleOf(ctx: any, sessionId: string, t?: Translate, archivedTitle?: string) {
   const row = sessionRow(ctx, sessionId)
   if (row?.blank) return t?.('newSession') ?? '新会话'
-  return row?.displayTitle ?? row?.title ?? sessionId
+  // Client list first: archived sessions stay in byId. The archive API title
+  // is the log-backed session/title event when that projection has not arrived.
+  // displayTitle is the cwd fallback (Hsia97, PR #1).
+  return (
+    presentTitle(row?.title) ??
+    presentTitle(archivedTitle) ??
+    presentTitle(row?.displayTitle) ??
+    sessionId
+  )
 }
 
 function leaveIfCurrent(ctx: any, sessionId: string) {
-  if (ctx.sessions.list.getSnapshot().current === sessionId) ctx.sessions.clear()
+  if (currentSessionId(sessionList(ctx)) !== sessionId) return
+  if (typeof ctx.uiWorkspace?.startSession === 'function') {
+    ctx.uiWorkspace.startSession()
+    return
+  }
+  ctx.sessions?.clear?.()
+}
+
+function openSession(ctx: any, sessionId: string) {
+  if (typeof ctx.uiWorkspace?.openSession === 'function') {
+    ctx.uiWorkspace.openSession(sessionId)
+    return
+  }
+  ctx.sessions?.open?.(sessionId)
 }
 
 function wait(ms: number) {
@@ -220,16 +309,24 @@ function wait(ms: number) {
 }
 
 function sessionIsBusy(ctx: any, sessionId: string) {
-  if (ctx.sessions.list.getSnapshot().byId?.[sessionId]?.running === true) return true
-  const snap = ctx.sessions.binding(sessionId)?.session?.getSnapshot?.() as
+  if (sessionList(ctx)?.byId?.[sessionId]?.running === true) return true
+  const snap = ctx.sessions?.binding?.(sessionId)?.session?.getSnapshot?.() as
     | {
         running?: boolean
         partial?: unknown
         runningCalls?: readonly unknown[]
+        awaitingFirstTurn?: boolean
+        pendingSubmissions?: readonly unknown[]
       }
     | undefined
   if (!snap) return false
-  return snap.running === true || snap.partial != null || (snap.runningCalls?.length ?? 0) > 0
+  return (
+    snap.running === true ||
+    snap.awaitingFirstTurn === true ||
+    (snap.pendingSubmissions?.length ?? 0) > 0 ||
+    snap.partial != null ||
+    (snap.runningCalls?.length ?? 0) > 0
+  )
 }
 
 async function waitUntilIdle(ctx: any, sessionId: string) {
@@ -253,18 +350,20 @@ function textBlocks(content: readonly { type?: string; text?: string }[] | undef
 
 function sessionSnapshot(ctx: any, sessionId: string | undefined) {
   if (!sessionId) return undefined
-  return ctx.sessions.binding(sessionId)?.session?.getSnapshot?.()
+  return ctx.sessions?.binding?.(sessionId)?.session?.getSnapshot?.()
 }
 
 function atSeqBeforeUser(snapshot: any, node: any): number | undefined {
   const seq = typeof node?.data?.seq === 'number' ? node.data.seq : undefined
   const loc = node?.location
-  const turn = loc?.kind === 'turn' || loc?.kind === 'step' ? loc.turn?.turn : undefined
-  if (typeof turn === 'number' && turn > 1) {
-    const end = snapshot?.turnEnds?.get?.(turn - 1)
+  const turnNumber = loc?.kind === 'turn' || loc?.kind === 'step' ? loc.turn?.turn : undefined
+  if (typeof turnNumber === 'number' && turnNumber > 1) {
+    const end = snapshot?.turnEnds?.get?.(turnNumber - 1)
     if (typeof end === 'number') return end
   }
-  if (typeof seq === 'number' && seq > 1) return seq - 1
+  const turnStart = loc?.kind === 'turn' || loc?.kind === 'step' ? loc.turn?.start?.seq : undefined
+  if (typeof seq === 'number' && seq > 0) return seq - 1
+  if (typeof turnStart === 'number' && turnStart > 0) return turnStart - 1
   return undefined
 }
 
@@ -280,14 +379,14 @@ function draftFromUserNode(snapshot: any, node: any, sessionId: string): EditDra
 }
 
 function officialUserRenderer(ctx: any) {
-  const entries = ctx.slots.entries('conversation.chat.node') as Array<{
+  const entries = (ctx.slots?.entries?.('conversation.chat.node') ?? []) as Array<{
     component?: unknown
     options?: { key?: string; priority?: number }
   }>
   return entries.find((entry) => entry.options?.key === 'user' && (entry.options?.priority ?? 0) === 0)?.component
 }
 
-export const inject = ['slots', 'locale', 'sessions', 'workspaces']
+export const inject = ['slots', 'locale', 'sessions', 'workspaces', 'uiWorkspace']
 
 export function apply(ctx: any) {
   const tPlus = ctx.locale.bind('session-plus')
@@ -307,7 +406,7 @@ export function apply(ctx: any) {
         type="button"
         className={props.wide ? 'sp_btn' : 'sp_btn sp_btnRail'}
         aria-label={t('archive')}
-        aria-pressed={state.open}
+        aria-pressed={state?.open ?? false}
         onClick={() =>
           panel.update((draft) => {
             draft.open = !draft.open
@@ -325,24 +424,22 @@ export function apply(ctx: any) {
   function Overlay(props: { t?: Translate }) {
     const t = props.t ?? ((key: string) => (zh as Record<string, string>)[key] ?? key)
     const state = useStore(panel)
-    const sessions = useStore<{
-      current?: string
-      ids?: string[]
-      byId?: Record<string, { displayTitle?: string; title?: string; blank?: boolean }>
-    }>(ctx.sessions.list)
-    const workspaces = useStore<{ archivedSessionIds?: string[] }>(ctx.workspaces.list)
+    const sessions = useStore<SessionListSnap>(ctx.sessions?.list)
+    const workspaces = useStore<{ archivedSessionIds?: string[] }>(ctx.workspaces?.list)
     const [rows, setRows] = useState<ArchivedRow[]>([])
     const [busy, setBusy] = useState(false)
-    const currentId = sessions.current as string | undefined
-    const currentSummary = currentId ? sessions.byId?.[currentId] : undefined
+    const [preview, setPreview] = useState<{ id: string; count: number; descendantIds: string[] } | null>(null)
+    const [previewError, setPreviewError] = useState<string>()
+    const currentId = currentSessionId(sessions)
+    const currentSummary = currentId ? sessions?.byId?.[currentId] : undefined
     const currentIsBlank = currentSummary?.blank === true
     const archivedIds = useMemo(
-      () => new Set((workspaces.archivedSessionIds ?? []).map(String)),
-      [workspaces.archivedSessionIds],
+      () => new Set((workspaces?.archivedSessionIds ?? []).map(String)),
+      [workspaces?.archivedSessionIds],
     )
 
     useEffect(() => {
-      if (!state.open) return
+      if (!state?.open) return
       let cancelled = false
       readApi<{ sessions: ArchivedRow[] }>('/api/session-plus/archived')
         .then((body) => {
@@ -358,10 +455,36 @@ export function apply(ctx: any) {
       return () => {
         cancelled = true
       }
-    }, [state.open, workspaces.archivedSessionIds, sessions.ids])
+    }, [state?.open, workspaces?.archivedSessionIds, sessions?.ids])
 
     useEffect(() => {
-      if (!state.pendingDelete) return
+      const id = state?.pendingDelete
+      if (!id) {
+        setPreview(null)
+        setPreviewError(undefined)
+        return
+      }
+      let cancelled = false
+      setPreview(null)
+      setPreviewError(undefined)
+      readApi<{ descendantCount: number; descendantIds?: string[] }>(
+        `/api/session-plus/delete-preview?sessionId=${encodeURIComponent(id)}`,
+      )
+        .then((body) => {
+          if (!cancelled) {
+            setPreview({ id, count: body.descendantCount ?? 0, descendantIds: body.descendantIds ?? [] })
+          }
+        })
+        .catch((error: Error) => {
+          if (!cancelled) setPreviewError(error.message)
+        })
+      return () => {
+        cancelled = true
+      }
+    }, [state?.pendingDelete])
+
+    useEffect(() => {
+      if (!state?.pendingDelete) return
       const onKey = (event: KeyboardEvent) => {
         if (event.key !== 'Escape') return
         event.preventDefault()
@@ -372,7 +495,7 @@ export function apply(ctx: any) {
       }
       window.addEventListener('keydown', onKey, true)
       return () => window.removeEventListener('keydown', onKey, true)
-    }, [state.pendingDelete])
+    }, [state?.pendingDelete])
 
     async function run(action: () => Promise<void>) {
       setBusy(true)
@@ -384,33 +507,46 @@ export function apply(ctx: any) {
       } catch (error) {
         const err = error as Error & { code?: string }
         panel.update((draft) => {
-          draft.error = err.code === 'running' ? t('running') : err.message
+          draft.error =
+            err.code === 'running'
+              ? t('running')
+              : err.code === 'open'
+                ? t('open')
+                : err.code === 'stale'
+                  ? t('stale')
+                  : err.message
         })
       } finally {
         setBusy(false)
       }
     }
 
-    if (!state.open) return null
+    if (!state?.open) return null
 
     const pendingId = state.pendingDelete
     const pendingName = pendingId ? titleOf(ctx, pendingId, t) : ''
+    const previewReady = Boolean(pendingId && preview?.id === pendingId)
 
     function cancelDelete() {
       panel.update((draft) => {
         draft.pendingDelete = undefined
+        draft.error = undefined
       })
     }
 
     function confirmDelete() {
-      if (!pendingId || busy) return
+      if (!pendingId || busy || !previewReady) return
       run(async () => {
         await waitUntilIdle(ctx, pendingId)
-        leaveIfCurrent(ctx, pendingId)
         await readApi('/api/session-plus/delete', {
           method: 'POST',
-          body: JSON.stringify({ sessionId: pendingId, confirm: true }),
+          body: JSON.stringify({
+            sessionId: pendingId,
+            confirm: true,
+            descendantIds: preview?.id === pendingId ? preview.descendantIds : [],
+          }),
         })
+        leaveIfCurrent(ctx, pendingId)
         setRows((current) => current.filter((row) => row.id !== pendingId))
         panel.update((draft) => {
           draft.pendingDelete = undefined
@@ -427,12 +563,18 @@ export function apply(ctx: any) {
           type="button"
           className="sp_scrim"
           aria-label={t('close')}
-          onClick={() =>
+          onClick={() => {
+            if (panel.getSnapshot().pendingDelete) {
+              panel.update((draft) => {
+                draft.pendingDelete = undefined
+              })
+              return
+            }
             panel.update((draft) => {
               draft.open = false
               draft.pendingDelete = undefined
             })
-          }
+          }}
         />
         <aside className="sp_panel" role="dialog" aria-label={t('title')}>
           <div className="sp_head">
@@ -471,7 +613,7 @@ export function apply(ctx: any) {
                       onClick={() =>
                         run(async () => {
                           await waitUntilIdle(ctx, currentId)
-                          await ctx.workspaces.archiveSession(currentId)
+                          await ctx.workspaces?.archiveSession?.(currentId)
                           leaveIfCurrent(ctx, currentId)
                         })
                       }
@@ -484,6 +626,7 @@ export function apply(ctx: any) {
                       onAsk={() =>
                         panel.update((draft) => {
                           draft.pendingDelete = currentId
+                          draft.error = undefined
                         })
                       }
                     />
@@ -501,7 +644,7 @@ export function apply(ctx: any) {
               ) : (
                 visibleRows.map((row) => (
                   <div className="sp_row" key={row.id}>
-                    <div className="sp_name">{titleOf(ctx, row.id, t)}</div>
+                    <div className="sp_name">{titleOf(ctx, row.id, t, row.title)}</div>
                     {row.cwd ? <div className="sp_meta">{row.cwd}</div> : null}
                     <div className="sp_actions">
                       <button
@@ -514,7 +657,7 @@ export function apply(ctx: any) {
                               method: 'POST',
                               body: JSON.stringify({ sessionId: row.id }),
                             })
-                            if (ctx.sessions.list.getSnapshot().byId?.[row.id]) ctx.sessions.open(row.id)
+                            if (sessionList(ctx)?.byId?.[row.id]) openSession(ctx, row.id)
                           })
                         }
                       >
@@ -526,6 +669,7 @@ export function apply(ctx: any) {
                         onAsk={() =>
                           panel.update((draft) => {
                             draft.pendingDelete = row.id
+                            draft.error = undefined
                           })
                         }
                       />
@@ -545,8 +689,9 @@ export function apply(ctx: any) {
               {pendingName}
             </p>
             <p className="sp_modalMsg" id="sp-del-msg">
-              {t('confirm')}
+              {previewReady ? t('confirm', { count: preview?.count ?? 0 }) : previewError ?? t('confirmLoading')}
             </p>
+            {state.error ? <p className="sp_error">{state.error}</p> : null}
             <div className="sp_modalActions">
               <button type="button" className="sp_mini" autoFocus disabled={busy} onClick={cancelDelete}>
                 {t('cancel')}
@@ -555,7 +700,7 @@ export function apply(ctx: any) {
                 type="button"
                 className="sp_mini sp_danger"
                 style={{ background: '#ef4444', backgroundColor: '#ef4444', borderColor: '#ef4444', color: '#fff' }}
-                disabled={busy}
+                disabled={busy || !previewReady}
                 onClick={confirmDelete}
               >
                 {t('delete')}
@@ -574,7 +719,7 @@ export function apply(ctx: any) {
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState<string>()
       const nodeKey = String(props.node?.key ?? props.node?.data?.seq ?? '')
-      const mine = state.edit?.sessionId === props.sessionId && state.edit?.nodeKey === nodeKey
+      const mine = state?.edit?.sessionId === props.sessionId && state?.edit?.nodeKey === nodeKey
 
       return (
         <div className="sp_userChrome">
@@ -605,7 +750,7 @@ export function apply(ctx: any) {
               <BranchIcon />
               <span className="sp_tip">{tPlus('branch')}</span>
             </button>
-            {mine && state.edit ? (
+            {mine && state?.edit ? (
               <div className="sp_branchPop" role="dialog" aria-label={tPlus('branch')}>
                 <p className="sp_empty">{tPlus('branchHint')}</p>
                 <input
@@ -662,8 +807,15 @@ export function apply(ctx: any) {
                             atSeq: edit.atSeq,
                             increaseTitle: customTitle.length === 0,
                           })
-                          ctx.sessions.open(childId)
-                          const child = ctx.sessions.binding(childId)?.session
+                          // The web client has no sessions.open(). The workspace
+                          // service retains the child on the main view, which is
+                          // what makes sessions.binding() available.
+                          openSession(ctx, childId)
+                          let child = ctx.sessions.binding(childId)?.session
+                          for (let i = 0; !child && i < 50; i++) {
+                            await wait(100)
+                            child = ctx.sessions.binding(childId)?.session
+                          }
                           if (!child) throw new Error('forked session is not ready')
                           if (customTitle.length > 0) {
                             const renamed = await child.rename(customTitle)

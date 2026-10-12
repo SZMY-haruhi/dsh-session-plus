@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile, realpath, rm } from 'node:fs/promises'
+import { lstat, open, readdir, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 
@@ -178,12 +178,84 @@ export async function confirmInsideRoot(root: string, target: string): Promise<b
   }
 }
 
-function plaintextLog(filename: string, bytes: Buffer): string {
-  if (!filename.endsWith('.zstd')) return bytes.toString('utf8')
-  return zstdDecompressSync(bytes).toString('utf8')
+const HEADER_LINE_LIMIT = 1024 * 1024
+
+/**
+ * `zstdDecompressSync` arrived in Node 22.15. On 22.6–22.14 the export is
+ * missing; treating that as an unreadable header would archive the session
+ * and still report success.
+ */
+export function requireZstdDecompress(decompress: unknown = zstdDecompressSync): (bytes: Buffer) => Buffer {
+  if (typeof decompress !== 'function') {
+    const error = new Error('node:zlib zstdDecompressSync requires Node.js >= 22.15')
+    error.name = 'SessionPlusZstdUnavailable'
+    throw error
+  }
+  return decompress as (bytes: Buffer) => Buffer
 }
 
-/** Session id stored in one directory's committed log, if the header can be read. */
+async function readFirstPlainLine(file: string): Promise<string | undefined> {
+  const handle = await open(file, 'r')
+  try {
+    const chunks: Buffer[] = []
+    let read = 0
+    const buf = Buffer.alloc(4096)
+    while (read < HEADER_LINE_LIMIT) {
+      const { bytesRead } = await handle.read(buf, 0, Math.min(buf.length, HEADER_LINE_LIMIT - read), read)
+      if (bytesRead === 0) break
+      const slice = buf.subarray(0, bytesRead)
+      const newline = slice.indexOf(0x0a)
+      if (newline !== -1) {
+        chunks.push(slice.subarray(0, newline))
+        return Buffer.concat(chunks).toString('utf8').trim()
+      }
+      chunks.push(Buffer.from(slice))
+      read += bytesRead
+    }
+    const text = Buffer.concat(chunks).toString('utf8').trim()
+    return text.length > 0 ? text : undefined
+  } finally {
+    await handle.close()
+  }
+}
+
+/** Decompress only until the first header line is complete. Later frames stay unread. */
+async function readFirstZstdLine(file: string): Promise<string | undefined> {
+  const decompress = requireZstdDecompress()
+  const handle = await open(file, 'r')
+  try {
+    const chunks: Buffer[] = []
+    let read = 0
+    const buf = Buffer.alloc(8192)
+    while (read < HEADER_LINE_LIMIT) {
+      const { bytesRead } = await handle.read(buf, 0, Math.min(buf.length, HEADER_LINE_LIMIT - read), read)
+      if (bytesRead === 0) break
+      chunks.push(Buffer.from(buf.subarray(0, bytesRead)))
+      read += bytesRead
+      let text: string
+      try {
+        text = decompress(Buffer.concat(chunks)).toString('utf8')
+      } catch {
+        continue
+      }
+      const newline = text.indexOf('\n')
+      if (newline === -1) continue
+      const line = text.slice(0, newline).trim()
+      if (line.length === 0) continue
+      try {
+        JSON.parse(line)
+      } catch {
+        continue
+      }
+      return line
+    }
+    return undefined
+  } finally {
+    await handle.close()
+  }
+}
+
+/** Session id stored in one directory's committed log, if the header line can be read. */
 export async function readStoredSessionId(dir: string): Promise<string | undefined> {
   let names: string[]
   try {
@@ -194,14 +266,16 @@ export async function readStoredSessionId(dir: string): Promise<string | undefin
   for (const name of names) {
     if (!isCanonicalSessionLog(name)) continue
     try {
-      const text = plaintextLog(name, await readFile(join(dir, name)))
-      const line = text.split('\n', 1)[0]?.trim()
+      const line = name.endsWith('.zstd')
+        ? await readFirstZstdLine(join(dir, name))
+        : await readFirstPlainLine(join(dir, name))
       if (!line) continue
       const parsed: unknown = JSON.parse(line)
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue
       const id = (parsed as { id?: unknown }).id
       if (typeof id === 'string' && id.length > 0) return id
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.name === 'SessionPlusZstdUnavailable') throw error
       continue
     }
   }

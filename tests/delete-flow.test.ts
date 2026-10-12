@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -12,7 +11,9 @@ import {
   deletionIds,
   encodeSegment,
   projectKey,
+  readStoredSessionId,
   removeSessionDirectory,
+  requireZstdDecompress,
   sessionDirectory,
 } from '../src/host/session-files.ts'
 
@@ -27,38 +28,16 @@ type Listed = {
   revision: string
 }
 
-function request(method: string, url: string, body?: unknown): IncomingMessage {
-  const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body))
-  return {
-    method,
-    url,
-    async *[Symbol.asyncIterator]() {
-      if (payload) yield payload
-    },
-  } as IncomingMessage
+type FetchRoute = {
+  path: string
+  methods: readonly string[]
+  fetch: (request: Request) => Promise<Response>
 }
 
-function response() {
-  return {
-    statusCode: 0,
-    body: '',
-    setHeader() {},
-    end(payload?: string) {
-      this.body = payload ?? ''
-    },
-  }
-}
-
-async function call(
-  handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>,
-  method: string,
-  url: string,
-  body?: unknown,
-) {
-  const req = request(method, url, body)
-  const res = response()
-  await handler(req, res as unknown as ServerResponse)
-  return { status: res.statusCode, json: JSON.parse(res.body) as Record<string, unknown> }
+type WebRoute = {
+  kind?: string
+  path?: string
+  handler?: (req: unknown, res: unknown) => Promise<void>
 }
 
 function harness(options: {
@@ -66,10 +45,12 @@ function harness(options: {
   listed: Listed[]
   live?: ReadonlySet<string>
   running?: ReadonlySet<string>
+  titles?: Record<string, string>
 }) {
   const logs: string[] = []
   const archived: string[] = []
-  let handler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined
+  const routes = new Map<string, FetchRoute>()
+  const webRoutes: WebRoute[] = []
   const ctx = {
     logger: () => ({
       info: (...args: unknown[]) => {
@@ -80,12 +61,24 @@ function harness(options: {
     effect: (fn: () => void) => {
       fn()
     },
+    get(name: string) {
+      if (name !== 'sessionQuery' || !options.titles) return undefined
+      return {
+        async readTitle(id: string) {
+          const title = options.titles?.[id]
+          return title ? { title } : undefined
+        },
+      }
+    },
     workspaceRegistry: {
       archivedSessionIds: archived,
       async archiveSession(id: string) {
         archived.push(id)
       },
-      async unarchiveSession() {},
+      async unarchiveSession(id: string) {
+        const index = archived.indexOf(id)
+        if (index >= 0) archived.splice(index, 1)
+      },
     },
     sessionPersistence: {
       async list() {
@@ -96,9 +89,19 @@ function harness(options: {
         throw new Error('locate must not be called')
       },
     },
+    connection: {
+      fetch: {
+        register(route: FetchRoute) {
+          routes.set(route.path, route)
+          return async () => {
+            routes.delete(route.path)
+          }
+        },
+      },
+    },
     webServer: {
-      register(route: { handler: typeof handler }) {
-        handler = route.handler
+      register(route: WebRoute) {
+        webRoutes.push(route)
         return () => {}
       },
     },
@@ -116,8 +119,38 @@ function harness(options: {
     },
   }
   apply(ctx as unknown as Context)
-  if (!handler) throw new Error('route was not registered')
-  return { handler, logs, archived }
+  if (webRoutes.length > 0) throw new Error('webServer route would skip /api admission')
+
+  async function call(method: string, url: string, body?: unknown, authenticated = true) {
+    const pathname = new URL(url, 'http://session-plus.local').pathname
+    const prefix = webRoutes
+      .filter((route) => route.kind === 'prefix' && typeof route.path === 'string')
+      .filter((route) => pathname === route.path || pathname.startsWith(`${route.path}/`))
+      .sort((left, right) => (right.path?.length ?? 0) - (left.path?.length ?? 0))[0]
+    if (prefix && (prefix.path?.length ?? 0) > '/api'.length) {
+      return { status: 200, json: { ok: true, skippedAdmission: true }, text: '' }
+    }
+    if (!authenticated) return { status: 401, json: {}, text: 'unauthorized' }
+    const route = routes.get(pathname)
+    if (!route || !route.methods.includes(method)) return { status: 404, json: {}, text: 'not found' }
+    const response = await route.fetch(
+      new Request(`http://127.0.0.1${url}`, {
+        method,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+      }),
+    )
+    const text = await response.text()
+    let json: Record<string, unknown> = {}
+    try {
+      json = JSON.parse(text) as Record<string, unknown>
+    } catch {
+      json = {}
+    }
+    return { status: response.status, json, text }
+  }
+
+  return { call, logs, archived, routes }
 }
 
 async function writeSession(root: string, id: string, cwd = '/workspace', compressed = false) {
@@ -186,18 +219,15 @@ test('cascade delete removes subagents, keeps forks, and logs ids first', async 
       { header: { id: 'sp-fork', cwd: '/workspace', parentSession: 'sp-parent', isSeeded: true }, revision: '1' },
     ]
     const host = harness({ root, listed })
-    const preview = await call(
-      host.handler,
-      'GET',
-      '/api/session-plus/delete-preview?sessionId=sp-parent',
-    )
+    const preview = await host.call('GET', '/api/session-plus/delete-preview?sessionId=sp-parent')
     assert.equal(preview.status, 200)
     assert.equal(preview.json.descendantCount, 1)
     assert.deepEqual(preview.json.descendantIds, ['sp-child'])
 
-    const deleted = await call(host.handler, 'POST', '/api/session-plus/delete', {
+    const deleted = await host.call('POST', '/api/session-plus/delete', {
       sessionId: 'sp-parent',
       confirm: true,
+      descendantIds: ['sp-child'],
     })
     assert.equal(deleted.status, 200)
     assert.deepEqual(host.archived, ['sp-child', 'sp-parent'])
@@ -216,9 +246,10 @@ test('delete returns 409 while the session is open and does not remove the direc
     const dir = await writeSession(root, 'sp-open')
     const listed: Listed[] = [{ header: { id: 'sp-open', cwd: '/workspace' }, revision: '1' }]
     const host = harness({ root, listed, live: new Set(['sp-open']) })
-    const result = await call(host.handler, 'POST', '/api/session-plus/delete', {
+    const result = await host.call('POST', '/api/session-plus/delete', {
       sessionId: 'sp-open',
       confirm: true,
+      descendantIds: [],
     })
     assert.equal(result.status, 409)
     assert.equal(result.json.code, 'open')
@@ -238,9 +269,10 @@ test('a running session is refused before any directory is removed', async () =>
       listed: [{ header: { id: 'sp-run', cwd: '/workspace' }, revision: '1' }],
       running: new Set(['sp-run']),
     })
-    const result = await call(host.handler, 'POST', '/api/session-plus/delete', {
+    const result = await host.call('POST', '/api/session-plus/delete', {
       sessionId: 'sp-run',
       confirm: true,
+      descendantIds: [],
     })
     assert.equal(result.status, 409)
     assert.equal(result.json.code, 'running')
@@ -278,17 +310,21 @@ test('a project symlink is not followed, and a mismatched header is not deleted'
         { header: { id: 'sp-move', cwd: '/workspace' }, revision: '1' },
       ],
     })
-    const linked = await call(host.handler, 'POST', '/api/session-plus/delete', {
+    const linked = await host.call('POST', '/api/session-plus/delete', {
       sessionId: 'sp-link',
       confirm: true,
+      descendantIds: [],
     })
-    assert.equal(linked.status, 200)
+    assert.equal(linked.status, 404)
+    assert.equal(linked.json.code, 'not-found')
+    assert.deepEqual(host.archived, [])
     assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
     assert.match(await readFile(join(outside, encoded, 'session.v4.jsonl'), 'utf8'), /sp-link/)
 
-    const moved = await call(host.handler, 'POST', '/api/session-plus/delete', {
+    const moved = await host.call('POST', '/api/session-plus/delete', {
       sessionId: 'sp-move',
       confirm: true,
+      descendantIds: [],
     })
     assert.equal(moved.status, 200)
     assert.match(await readFile(join(decoy, 'session.v4.jsonl'), 'utf8'), /someone-else/)
@@ -308,15 +344,124 @@ test('two matching headers outside the expected project are ambiguous', async ()
       root,
       listed: [{ header: { id: 'sp-dup', cwd: '/workspace' }, revision: '1' }],
     })
-    const result = await call(host.handler, 'POST', '/api/session-plus/delete', {
+    const result = await host.call('POST', '/api/session-plus/delete', {
       sessionId: 'sp-dup',
       confirm: true,
+      descendantIds: [],
     })
     assert.equal(result.status, 409)
     assert.equal(result.json.code, 'ambiguous')
     assert.deepEqual(host.archived, [])
     assert.match(await readFile(join(left, 'session.v4.jsonl'), 'utf8'), /sp-dup/)
     assert.match(await readFile(join(right, 'session.v4.jsonl'), 'utf8'), /sp-dup/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('an anonymous delete is 401 and does not remove the directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sp-root-'))
+  try {
+    const dir = await writeSession(root, 'sp-secret')
+    const host = harness({
+      root,
+      listed: [{ header: { id: 'sp-secret', cwd: '/workspace' }, revision: '1' }],
+    })
+    assert.equal(host.routes.has('/api/session-plus/delete'), true)
+    const result = await host.call(
+      'POST',
+      '/api/session-plus/delete',
+      { sessionId: 'sp-secret', confirm: true, descendantIds: [] },
+      false,
+    )
+    assert.equal(result.status, 401)
+    assert.equal(result.text, 'unauthorized')
+    assert.deepEqual(host.archived, [])
+    assert.match(await readFile(join(dir, 'session.v4.jsonl'), 'utf8'), /sp-secret/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a stale descendant list is 409 and a missing directory is 404', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sp-root-'))
+  try {
+    const parent = await writeSession(root, 'sp-parent')
+    const child = await writeSession(root, 'sp-child')
+    const host = harness({
+      root,
+      listed: [
+        { header: { id: 'sp-parent', cwd: '/workspace' }, revision: '1' },
+        { header: { id: 'sp-child', cwd: '/workspace', parentSession: 'sp-parent', origin: 'subagent' }, revision: '1' },
+        { header: { id: 'sp-gone', cwd: '/workspace' }, revision: '1' },
+      ],
+    })
+    const stale = await host.call('POST', '/api/session-plus/delete', {
+      sessionId: 'sp-parent',
+      confirm: true,
+      descendantIds: [],
+    })
+    assert.equal(stale.status, 409)
+    assert.equal(stale.json.code, 'stale')
+    assert.deepEqual(host.archived, [])
+    assert.match(await readFile(join(parent, 'session.v4.jsonl'), 'utf8'), /sp-parent/)
+    assert.match(await readFile(join(child, 'session.v4.jsonl'), 'utf8'), /sp-child/)
+
+    const missing = await host.call('POST', '/api/session-plus/delete', {
+      sessionId: 'sp-gone',
+      confirm: true,
+      descendantIds: [],
+    })
+    assert.equal(missing.status, 404)
+    assert.equal(missing.json.code, 'not-found')
+    assert.deepEqual(missing.json.missing, ['sp-gone'])
+    assert.deepEqual(host.archived, [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('archive rows include the log-backed title', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sp-root-'))
+  try {
+    await writeSession(root, 'sp-titled')
+    const host = harness({
+      root,
+      listed: [{ header: { id: 'sp-titled', cwd: '/workspace' }, revision: '1' }],
+      titles: { 'sp-titled': 'Edited branch' },
+    })
+    host.archived.push('sp-titled')
+    const listed = await host.call('GET', '/api/session-plus/archived')
+    assert.equal(listed.status, 200)
+    const sessions = listed.json.sessions as { id: string; title?: string }[]
+    assert.equal(sessions[0]?.title, 'Edited branch')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a missing zstd decoder fails explicitly', () => {
+  assert.throws(
+    () => requireZstdDecompress(null),
+    (error: unknown) => {
+      assert.ok(error instanceof Error)
+      assert.equal(error.name, 'SessionPlusZstdUnavailable')
+      return true
+    },
+  )
+})
+
+test('readStoredSessionId stops at the first header line', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sp-root-'))
+  try {
+    const plain = await writeSession(root, 'sp-plain')
+    await writeFile(join(plain, 'session.v4.jsonl'), `{"id":"sp-plain"}\n${'x'.repeat(1024 * 256)}`, 'utf8')
+    assert.equal(await readStoredSessionId(plain), 'sp-plain')
+
+    const packed = await writeSession(root, 'sp-zstd', '/workspace', true)
+    const header = zstdCompressSync(Buffer.from('{"id":"sp-zstd"}\n'))
+    await writeFile(join(packed, 'session.v4.jsonl.zstd'), Buffer.concat([header, Buffer.alloc(1024 * 256, 7)]))
+    assert.equal(await readStoredSessionId(packed), 'sp-zstd')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

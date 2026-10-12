@@ -125,7 +125,7 @@ dsh plugin --profile web remove dsh-session-plus
 
 ## 从源码开发
 
-需要 Node.js >= 22.6。
+需要 Node.js >= 22.15。
 
 ```sh
 pnpm install
@@ -144,12 +144,14 @@ dsh plugin --profile web add .
 - `sessionPersistence.list()` 返回 `{ header, revision, eventCount?, sizeBytes? }`，不再把日志头当数组元素
 - 本插件不调用 `locate()`。0.2.0-rc.2 里它不在公开的 `SessionPersistence` 上。删除只认 JSONL 目录布局，并删掉整个会话目录
 - 删除父会话时级联删除 `origin: "subagent"` 的子会话；fork 不删
-- 确认框先向 `GET /api/session-plus/delete-preview` 要子代理数量，再写明会级联删除
+- 四个接口注册在 `ctx.connection.fetch` 的精确路径上，先走 `/api` 的 Host/Origin 和登录校验。未登录是 401
+- 确认框先向 `GET /api/session-plus/delete-preview` 要子代理 id。删除请求把这份 id 带回去，对不上就 409，不删
+- 计划里的目录缺失时返回 404，不会先归档再报成功
 - `ctx.sessions` 里还握着计划删除的任何一个 id 时，删除返回 409，不关 handle，也不删目录。正在跑的会话同样是 409
-- 归档列表的标题用 `title ?? displayTitle`（先用持久标题，没有再用展示标题）。这个顺序来自 [Hsia97](https://github.com/Hsia97) 的 PR #1
+- 归档列表的名字先用客户端会话列表里的持久 `title`，没有再用接口带回的 `session/title`，最后才是 `displayTitle`。这个顺序来自 [Hsia97](https://github.com/Hsia97) 的 PR #1。归档不会把会话从客户端 `byId` 里拿掉
 - 确认框的层叠高于归档面板；侧栏按钮不再用负外边距撑出脚栏
 - 订阅 workspace / session 列表时保留 `getSnapshot` 的 `this`
-- 开发和测试需要 Node.js >= 22.6（`node --experimental-strip-types`）
+- 需要 Node.js >= 22.15（`zstdDecompressSync`）。更早的 22 会明确失败，而不是归档成功却留下日志
 
 级联删除和「不要把 fork 当成子代理」里，列表解包的方向来自 [Hsia97](https://github.com/Hsia97) 的 PR #1。那一版按任意 `parentSession` 级联，而且只处理 `session.v3.jsonl.zstd`。这一版只删 `origin: "subagent"`，并删整个会话目录。
 

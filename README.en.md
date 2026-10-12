@@ -121,7 +121,7 @@ dsh plugin --profile web remove dsh-session-plus
 
 ## Develop from source
 
-Node.js >= 22.6 is required.
+Node.js >= 22.15 is required.
 
 ```sh
 pnpm install
@@ -140,12 +140,14 @@ Match session persistence after DSH 0.1.5, checked against 0.2.0-rc.2:
 - `sessionPersistence.list()` returns `{ header, revision, eventCount?, sizeBytes? }` instead of raw headers
 - This plugin does not call `locate()`. On 0.2.0-rc.2 it is not on the public `SessionPersistence` type. Delete follows the JSONL directory layout and removes the whole session directory
 - Deleting a parent also deletes `origin: "subagent"` children. Forks are not deleted
-- The confirm dialog asks `GET /api/session-plus/delete-preview` for the descendant count and says the delete cascades
+- The four routes are exact `ctx.connection.fetch` paths. `/api` checks Host/Origin and the browser session first. An anonymous request is 401
+- The confirm dialog asks `GET /api/session-plus/delete-preview` for the descendant ids. Delete sends those ids back and returns 409 when they no longer match
+- A missing directory in the plan returns 404. The route does not archive it and then report success
 - If `ctx.sessions` still holds any id in the delete plan, delete returns 409. The handle stays open and the directory stays. A running session is also 409
-- Archive rows show `title ?? displayTitle` (the durable title, then the display title). That order comes from [Hsia97](https://github.com/Hsia97)'s PR #1
+- Archive names use the client session list's durable `title`, then the `session/title` value returned by the archive API, then `displayTitle`. That order comes from [Hsia97](https://github.com/Hsia97)'s PR #1. Archiving leaves the session in the client `byId` map
 - The confirm dialog stacks above the archive panel. The sidebar button no longer uses a negative margin that overflows the footer
 - Session and workspace subscriptions keep `this` on `getSnapshot`
-- Development and tests need Node.js >= 22.6 (`node --experimental-strip-types`)
+- Node.js >= 22.15 is required (`zstdDecompressSync`). Older 22 releases fail explicitly instead of archiving a session and reporting success
 
 The list-unwrapping direction, and the idea of cleaning subagent sessions, come from [Hsia97](https://github.com/Hsia97)'s PR #1. That change cascaded on every `parentSession`, and it only removed `session.v3.jsonl.zstd`. This cut deletes `origin: "subagent"` sessions only, and it removes the whole session directory.
 

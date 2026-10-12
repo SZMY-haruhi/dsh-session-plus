@@ -1,5 +1,4 @@
 import { resolve } from 'node:path'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   assertSessionsReleased,
@@ -17,7 +16,7 @@ export const name = 'dsh-session-plus'
 export const inject = [
   'workspaceRegistry',
   'sessionPersistence',
-  'webServer',
+  'connection',
   'sessions',
   'agents',
 ]
@@ -53,15 +52,22 @@ type HostLogger = {
   warn(...args: unknown[]): void
 }
 
+type FetchMethod = 'GET' | 'HEAD' | 'POST'
+
+type ConnectionFetchRoute = {
+  path: string
+  methods: readonly FetchMethod[]
+  requestBody: 'buffered' | 'streaming'
+  fetch: (request: Request) => Promise<Response>
+}
+
 type HostContext = Context & {
   workspaceRegistry: RegistryInternals
   sessionPersistence: PersistenceService
-  webServer: {
-    register(route: {
-      kind: 'exact' | 'prefix'
-      path: string
-      handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
-    }): () => void
+  connection: {
+    fetch: {
+      register(route: ConnectionFetchRoute): () => Promise<void>
+    }
   }
   sessions: {
     get(id: string): { header: SessionHeaderLike } | undefined
@@ -74,28 +80,21 @@ type HostContext = Context & {
 type ArchivedRow = {
   id: string
   cwd?: string
+  title?: string
   live: boolean
   running: boolean
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown) {
-  const payload = JSON.stringify(body)
-  res.statusCode = status
-  res.setHeader('content-type', 'application/json; charset=utf-8')
-  res.setHeader('content-length', Buffer.byteLength(payload))
-  res.end(payload)
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  })
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = []
-  let size = 0
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    size += buf.length
-    if (size > 64 * 1024) throw new Error('body too large')
-    chunks.push(buf)
-  }
-  const raw = Buffer.concat(chunks).toString('utf8').trim()
+async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+  const raw = (await request.text()).trim()
+  if (raw.length > 64 * 1024) throw new Error('body too large')
   if (!raw) return {}
   const parsed: unknown = JSON.parse(raw)
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -110,17 +109,16 @@ function asSessionId(value: unknown): string | undefined {
   return id.length > 0 ? id : undefined
 }
 
-function requestUrl(req: IncomingMessage): URL {
-  return new URL(req.url ?? '/', 'http://session-plus.local')
+function errorDetails(error: unknown): Record<string, unknown> | undefined {
+  if (!(error instanceof Error)) return undefined
+  const details = (error as Error & { details?: Record<string, unknown> }).details
+  return details && typeof details === 'object' ? details : undefined
 }
 
-function pathnameOf(req: IncomingMessage): string {
-  return requestUrl(req).pathname.replace(/\/+$/, '') || '/'
-}
-
-function namedError(name: string, message: string) {
-  const error = new Error(message)
+function namedError(name: string, message: string, details?: Record<string, unknown>) {
+  const error = new Error(message) as Error & { details?: Record<string, unknown> }
   error.name = name
+  if (details) error.details = details
   return error
 }
 
@@ -181,6 +179,25 @@ async function logStillOnDisk(ctx: HostContext, sessionId: string, byId: Map<str
   }
 }
 
+/**
+ * Durable titles live in `session/title` events, not in the log header.
+ * The archive panel reads `ctx.sessions.list` first (`title`, then
+ * `displayTitle`). This field is the same log-backed title from
+ * `sessionQuery.readTitle`, for a row whose client projection has not arrived.
+ */
+async function durableTitle(ctx: HostContext, sessionId: string): Promise<string | undefined> {
+  const query = ctx.get('sessionQuery') as { readTitle?: (id: string) => Promise<unknown> } | undefined
+  if (typeof query?.readTitle !== 'function') return undefined
+  try {
+    const snapshot = await query.readTitle(sessionId)
+    if (snapshot === null || typeof snapshot !== 'object') return undefined
+    const title = (snapshot as { title?: unknown }).title
+    return typeof title === 'string' && title.trim().length > 0 ? title : undefined
+  } catch {
+    return undefined
+  }
+}
+
 async function listArchived(ctx: HostContext): Promise<ArchivedRow[]> {
   const ids = ctx.workspaceRegistry.archivedSessionIds.map(String)
   const byId = await listedHeaders(ctx)
@@ -189,9 +206,11 @@ async function listArchived(ctx: HostContext): Promise<ArchivedRow[]> {
     if (!stillStored(ctx, id, byId) || !(await logStillOnDisk(ctx, id, byId))) continue
     const agent = ctx.agents.get(id)
     const header = byId.get(id) ?? ctx.sessions.get(id)?.header
+    const title = await durableTitle(ctx, id)
     rows.push({
       id,
       cwd: header?.cwd,
+      ...(title ? { title } : {}),
       live: Boolean(ctx.sessions.get(id) || agent),
       running: agent?.status === 'running',
     })
@@ -220,8 +239,36 @@ async function hideFromGrouping(ctx: HostContext, sessionId: string) {
  * Logged before any archive or rm. A live id in `ctx.sessions` refuses the
  * whole plan: disposing the agent does not close that persistence handle.
  */
-async function deleteSession(ctx: HostContext, sessionId: string, logger: HostLogger) {
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index])
+}
+
+function asIdList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const ids: string[] = []
+  for (const item of value) {
+    const id = asSessionId(item)
+    if (!id) return undefined
+    ids.push(id)
+  }
+  return ids
+}
+
+async function deleteSession(
+  ctx: HostContext,
+  sessionId: string,
+  descendantIds: readonly string[],
+  logger: HostLogger,
+) {
   const headers = await listedHeaders(ctx)
+  const descendants = subagentDescendants(headers.values(), sessionId)
+  if (!sameIds(descendants, descendantIds)) {
+    throw namedError(
+      'SessionPlusPreviewStale',
+      'descendant sessions changed; refresh the confirmation and try again',
+      { descendantIds: descendants },
+    )
+  }
   const ids = deletionIds(headers.values(), sessionId)
   logger.info(`dsh-session-plus delete plan: ${ids.join(' ')}`)
   for (const id of ids) await assertIdle(ctx, id)
@@ -236,6 +283,10 @@ async function deleteSession(ctx: HostContext, sessionId: string, logger: HostLo
     const dir = header ? await findSessionDirectory(root, header) : undefined
     planned.push({ id, dir })
   }
+  const missing = planned.filter((item) => !item.dir).map((item) => item.id)
+  if (missing.length > 0) {
+    throw namedError('SessionPlusNotFound', `session directory not found: ${missing.join(' ')}`, { missing })
+  }
   for (const item of planned) {
     await hideFromGrouping(ctx, item.id)
     if (!item.dir) continue
@@ -249,87 +300,104 @@ async function previewDelete(ctx: HostContext, sessionId: string) {
   return { sessionId, descendantCount: descendantIds.length, descendantIds }
 }
 
+async function respond(logger: HostLogger, run: () => Promise<Response>): Promise<Response> {
+  try {
+    return await run()
+  } catch (error) {
+    const name = errorName(error)
+    const message = error instanceof Error ? error.message : String(error)
+    const details = errorDetails(error)
+    logger.warn('dsh-session-plus route failed', error)
+    if (name === 'SessionPlusRunning' || name === 'WorkspaceActiveSessionError') {
+      return jsonResponse(409, { ok: false, error: message, code: 'running' })
+    }
+    if (name === 'SessionPlusOpen') {
+      return jsonResponse(409, { ok: false, error: message, code: 'open' })
+    }
+    if (name === 'SessionPlusPreviewStale') {
+      return jsonResponse(409, { ok: false, error: message, code: 'stale', ...details })
+    }
+    if (name === 'SessionPlusUnsafePath') {
+      return jsonResponse(409, { ok: false, error: message, code: 'unsafe' })
+    }
+    if (name === 'SessionPlusAmbiguousArtifact') {
+      return jsonResponse(409, { ok: false, error: message, code: 'ambiguous' })
+    }
+    if (name === 'SessionPlusNotFound') {
+      return jsonResponse(404, { ok: false, error: message, code: 'not-found', ...details })
+    }
+    if (name === 'SessionPlusNoArtifact') {
+      return jsonResponse(501, { ok: false, error: message, code: 'no-artifact' })
+    }
+    if (name === 'SessionPlusZstdUnavailable') {
+      return jsonResponse(500, { ok: false, error: message, code: 'zstd' })
+    }
+    return jsonResponse(500, { ok: false, error: message })
+  }
+}
+
+/**
+ * Exact Fetch routes on `ctx.connection`. The `/api` prefix admits the
+ * request (Host/Origin, then 401) before these handlers run. A longer
+ * `webServer` prefix would skip that admission.
+ */
 export function apply(ctx: Context) {
   const host = ctx as HostContext
   const logger = host.logger('dsh-session-plus')
+  const routes: ConnectionFetchRoute[] = [
+    {
+      path: '/api/session-plus/archived',
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: () => respond(logger, async () => jsonResponse(200, { ok: true, sessions: await listArchived(host) })),
+    },
+    {
+      path: '/api/session-plus/delete-preview',
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        respond(logger, async () => {
+          const sessionId = asSessionId(new URL(request.url).searchParams.get('sessionId'))
+          if (!sessionId) return jsonResponse(400, { ok: false, error: 'sessionId required' })
+          return jsonResponse(200, { ok: true, ...(await previewDelete(host, sessionId)) })
+        }),
+    },
+    {
+      path: '/api/session-plus/unarchive',
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        respond(logger, async () => {
+          const sessionId = asSessionId((await readJsonBody(request)).sessionId)
+          if (!sessionId) return jsonResponse(400, { ok: false, error: 'sessionId required' })
+          await unarchiveSession(host, sessionId)
+          return jsonResponse(200, { ok: true, sessions: await listArchived(host) })
+        }),
+    },
+    {
+      path: '/api/session-plus/delete',
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        respond(logger, async () => {
+          const body = await readJsonBody(request)
+          const sessionId = asSessionId(body.sessionId)
+          if (!sessionId) return jsonResponse(400, { ok: false, error: 'sessionId required' })
+          if (body.confirm !== true) return jsonResponse(400, { ok: false, error: 'confirm required' })
+          const descendantIds = asIdList(body.descendantIds)
+          if (!descendantIds) return jsonResponse(400, { ok: false, error: 'descendantIds required' })
+          await deleteSession(host, sessionId, descendantIds, logger)
+          return jsonResponse(200, { ok: true, sessions: await listArchived(host) })
+        }),
+    },
+  ]
 
-  host.effect(
-    () =>
-      host.webServer.register({
-        kind: 'prefix',
-        path: '/api/session-plus',
-        handler: async (req, res) => {
-          const path = pathnameOf(req)
-          try {
-            if (path === '/api/session-plus/archived' && req.method === 'GET') {
-              sendJson(res, 200, { ok: true, sessions: await listArchived(host) })
-              return
-            }
-            if (path === '/api/session-plus/delete-preview' && req.method === 'GET') {
-              const sessionId = asSessionId(requestUrl(req).searchParams.get('sessionId'))
-              if (!sessionId) {
-                sendJson(res, 400, { ok: false, error: 'sessionId required' })
-                return
-              }
-              sendJson(res, 200, { ok: true, ...(await previewDelete(host, sessionId)) })
-              return
-            }
-            if (path === '/api/session-plus/unarchive' && req.method === 'POST') {
-              const sessionId = asSessionId((await readJsonBody(req)).sessionId)
-              if (!sessionId) {
-                sendJson(res, 400, { ok: false, error: 'sessionId required' })
-                return
-              }
-              await unarchiveSession(host, sessionId)
-              sendJson(res, 200, { ok: true, sessions: await listArchived(host) })
-              return
-            }
-            if (path === '/api/session-plus/delete' && req.method === 'POST') {
-              const body = await readJsonBody(req)
-              const sessionId = asSessionId(body.sessionId)
-              if (!sessionId) {
-                sendJson(res, 400, { ok: false, error: 'sessionId required' })
-                return
-              }
-              if (body.confirm !== true) {
-                sendJson(res, 400, { ok: false, error: 'confirm required' })
-                return
-              }
-              await deleteSession(host, sessionId, logger)
-              sendJson(res, 200, { ok: true, sessions: await listArchived(host) })
-              return
-            }
-            sendJson(res, 404, { ok: false, error: 'not found' })
-          } catch (error) {
-            const name = errorName(error)
-            const message = error instanceof Error ? error.message : String(error)
-            logger.warn('dsh-session-plus route failed', error)
-            if (name === 'SessionPlusRunning' || name === 'WorkspaceActiveSessionError') {
-              sendJson(res, 409, { ok: false, error: message, code: 'running' })
-              return
-            }
-            if (name === 'SessionPlusOpen') {
-              sendJson(res, 409, { ok: false, error: message, code: 'open' })
-              return
-            }
-            if (name === 'SessionPlusUnsafePath') {
-              sendJson(res, 409, { ok: false, error: message, code: 'unsafe' })
-              return
-            }
-            if (name === 'SessionPlusAmbiguousArtifact') {
-              sendJson(res, 409, { ok: false, error: message, code: 'ambiguous' })
-              return
-            }
-            if (name === 'SessionPlusNoArtifact') {
-              sendJson(res, 501, { ok: false, error: message, code: 'no-artifact' })
-              return
-            }
-            sendJson(res, 500, { ok: false, error: message })
-          }
-        },
-      }),
-    'dsh-session-plus.http',
-  )
+  host.effect(() => {
+    const stops = routes.map((route) => host.connection.fetch.register(route))
+    return async () => {
+      for (const stop of stops) await stop()
+    }
+  }, 'dsh-session-plus.http')
 
   logger.info('dsh-session-plus host ready')
 }

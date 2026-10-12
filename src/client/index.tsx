@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 type ArchivedRow = {
   id: string
   cwd?: string
+  title?: string
   live: boolean
   running: boolean
 }
@@ -90,6 +91,7 @@ const en = {
   confirm: 'This also deletes {count} sub-agent session(s). The logs cannot be recovered.',
   confirmLoading: 'Checking how many sub-agent sessions this deletes…',
   open: 'This session is still open in this process. Close it before deleting.',
+  stale: 'The sub-agent list changed. Close this dialog and try again.',
   cancel: 'Cancel',
   close: 'Close',
   hide: 'Archive',
@@ -115,6 +117,7 @@ const zh = {
   confirm: '这会一并删除 {count} 个子代理会话。日志无法恢复。',
   confirmLoading: '正在统计要删除的子代理会话…',
   open: '这个会话还在当前进程里打开着，请先关闭再删除。',
+  stale: '子代理列表变了。关掉这个对话框后再试一次。',
   cancel: '取消',
   close: '关闭',
   hide: '归档',
@@ -270,11 +273,18 @@ function presentTitle(value: unknown): string | undefined {
   return text.length > 0 ? text : undefined
 }
 
-function titleOf(ctx: any, sessionId: string, t?: Translate) {
+function titleOf(ctx: any, sessionId: string, t?: Translate, archivedTitle?: string) {
   const row = sessionRow(ctx, sessionId)
   if (row?.blank) return t?.('newSession') ?? '新会话'
-  // Durable title wins. displayTitle is only the fallback (Hsia97, PR #1).
-  return presentTitle(row?.title) ?? presentTitle(row?.displayTitle) ?? sessionId
+  // Client list first: archived sessions stay in byId. The archive API title
+  // is the log-backed session/title event when that projection has not arrived.
+  // displayTitle is the cwd fallback (Hsia97, PR #1).
+  return (
+    presentTitle(row?.title) ??
+    presentTitle(archivedTitle) ??
+    presentTitle(row?.displayTitle) ??
+    sessionId
+  )
 }
 
 function leaveIfCurrent(ctx: any, sessionId: string) {
@@ -418,7 +428,7 @@ export function apply(ctx: any) {
     const workspaces = useStore<{ archivedSessionIds?: string[] }>(ctx.workspaces?.list)
     const [rows, setRows] = useState<ArchivedRow[]>([])
     const [busy, setBusy] = useState(false)
-    const [preview, setPreview] = useState<{ id: string; count: number } | null>(null)
+    const [preview, setPreview] = useState<{ id: string; count: number; descendantIds: string[] } | null>(null)
     const [previewError, setPreviewError] = useState<string>()
     const currentId = currentSessionId(sessions)
     const currentSummary = currentId ? sessions?.byId?.[currentId] : undefined
@@ -457,11 +467,13 @@ export function apply(ctx: any) {
       let cancelled = false
       setPreview(null)
       setPreviewError(undefined)
-      readApi<{ descendantCount: number }>(
+      readApi<{ descendantCount: number; descendantIds?: string[] }>(
         `/api/session-plus/delete-preview?sessionId=${encodeURIComponent(id)}`,
       )
         .then((body) => {
-          if (!cancelled) setPreview({ id, count: body.descendantCount ?? 0 })
+          if (!cancelled) {
+            setPreview({ id, count: body.descendantCount ?? 0, descendantIds: body.descendantIds ?? [] })
+          }
         })
         .catch((error: Error) => {
           if (!cancelled) setPreviewError(error.message)
@@ -496,7 +508,13 @@ export function apply(ctx: any) {
         const err = error as Error & { code?: string }
         panel.update((draft) => {
           draft.error =
-            err.code === 'running' ? t('running') : err.code === 'open' ? t('open') : err.message
+            err.code === 'running'
+              ? t('running')
+              : err.code === 'open'
+                ? t('open')
+                : err.code === 'stale'
+                  ? t('stale')
+                  : err.message
         })
       } finally {
         setBusy(false)
@@ -522,7 +540,11 @@ export function apply(ctx: any) {
         await waitUntilIdle(ctx, pendingId)
         await readApi('/api/session-plus/delete', {
           method: 'POST',
-          body: JSON.stringify({ sessionId: pendingId, confirm: true }),
+          body: JSON.stringify({
+            sessionId: pendingId,
+            confirm: true,
+            descendantIds: preview?.id === pendingId ? preview.descendantIds : [],
+          }),
         })
         leaveIfCurrent(ctx, pendingId)
         setRows((current) => current.filter((row) => row.id !== pendingId))
@@ -622,7 +644,7 @@ export function apply(ctx: any) {
               ) : (
                 visibleRows.map((row) => (
                   <div className="sp_row" key={row.id}>
-                    <div className="sp_name">{titleOf(ctx, row.id, t)}</div>
+                    <div className="sp_name">{titleOf(ctx, row.id, t, row.title)}</div>
                     {row.cwd ? <div className="sp_meta">{row.cwd}</div> : null}
                     <div className="sp_actions">
                       <button

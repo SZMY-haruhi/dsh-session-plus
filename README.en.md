@@ -121,6 +121,8 @@ dsh plugin --profile web remove dsh-session-plus
 
 ## Develop from source
 
+Node.js >= 22.6 is required.
+
 ```sh
 pnpm install
 pnpm build
@@ -136,12 +138,18 @@ dsh plugin --profile web add .
 Match session persistence after DSH 0.1.5, checked against 0.2.0-rc.2:
 
 - `sessionPersistence.list()` returns `{ header, revision, eventCount?, sizeBytes? }` instead of raw headers
-- The persistence seam no longer exposes `locate()`. Delete follows the JSONL directory layout and removes every generation in the session directory
+- This plugin does not call `locate()`. On 0.2.0-rc.2 it is not on the public `SessionPersistence` type. Delete follows the JSONL directory layout and removes the whole session directory
 - Deleting a parent also deletes `origin: "subagent"` children. Forks are not deleted
+- The confirm dialog asks `GET /api/session-plus/delete-preview` for the descendant count and says the delete cascades
+- If `ctx.sessions` still holds any id in the delete plan, delete returns 409. The handle stays open and the directory stays. A running session is also 409
+- Archive rows show `title ?? displayTitle` (the durable title, then the display title). That order comes from [Hsia97](https://github.com/Hsia97)'s PR #1
 - The confirm dialog stacks above the archive panel. The sidebar button no longer uses a negative margin that overflows the footer
 - Session and workspace subscriptions keep `this` on `getSnapshot`
+- Development and tests need Node.js >= 22.6 (`node --experimental-strip-types`)
 
-The list-unwrapping direction, and the idea of cleaning subagent sessions, come from [Hsia97](https://github.com/Hsia97)'s PR #1. That change cascaded on every `parentSession`, which also deletes edit-and-branch forks. This cut does not do that.
+The list-unwrapping direction, and the idea of cleaning subagent sessions, come from [Hsia97](https://github.com/Hsia97)'s PR #1. That change cascaded on every `parentSession`, and it only removed `session.v3.jsonl.zstd`. This cut deletes `origin: "subagent"` sessions only, and it removes the whole session directory.
+
+After a subagent is deleted, a fork of that subagent (a session that only stores `parentSession`) stays on disk. Its parent id is gone, so the fork is an orphan. A failure partway through the delete does not put removed directories back. The id list is written to the log before anything is deleted.
 
 ### 0.1.1 · 2026-08-18
 

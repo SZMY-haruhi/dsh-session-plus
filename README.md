@@ -125,6 +125,8 @@ dsh plugin --profile web remove dsh-session-plus
 
 ## 从源码开发
 
+需要 Node.js >= 22.6。
+
 ```sh
 pnpm install
 pnpm build
@@ -140,12 +142,18 @@ dsh plugin --profile web add .
 适配 DSH 0.1.5 之后的会话持久化，并在 0.2.0-rc.2 上核对过：
 
 - `sessionPersistence.list()` 返回 `{ header, revision, eventCount?, sizeBytes? }`，不再把日志头当数组元素
-- 持久化 seam 不再提供 `locate()`。删除改走 JSONL 目录布局，清掉会话目录里的各代日志
+- 本插件不调用 `locate()`。0.2.0-rc.2 里它不在公开的 `SessionPersistence` 上。删除只认 JSONL 目录布局，并删掉整个会话目录
 - 删除父会话时级联删除 `origin: "subagent"` 的子会话；fork 不删
+- 确认框先向 `GET /api/session-plus/delete-preview` 要子代理数量，再写明会级联删除
+- `ctx.sessions` 里还握着计划删除的任何一个 id 时，删除返回 409，不关 handle，也不删目录。正在跑的会话同样是 409
+- 归档列表的标题用 `title ?? displayTitle`（先用持久标题，没有再用展示标题）。这个顺序来自 [Hsia97](https://github.com/Hsia97) 的 PR #1
 - 确认框的层叠高于归档面板；侧栏按钮不再用负外边距撑出脚栏
 - 订阅 workspace / session 列表时保留 `getSnapshot` 的 `this`
+- 开发和测试需要 Node.js >= 22.6（`node --experimental-strip-types`）
 
-级联删除和「不要把 fork 当成子代理」里，列表解包的方向来自 [Hsia97](https://github.com/Hsia97) 的 PR #1。那一版按任意 `parentSession` 级联，会把修改并分支的会话一起删掉，这一版没有沿用。
+级联删除和「不要把 fork 当成子代理」里，列表解包的方向来自 [Hsia97](https://github.com/Hsia97) 的 PR #1。那一版按任意 `parentSession` 级联，而且只处理 `session.v3.jsonl.zstd`。这一版只删 `origin: "subagent"`，并删整个会话目录。
+
+删掉子代理之后，它自己的 fork（只写了 `parentSession`）会留在磁盘上，父 id 已经不在，变成孤儿。删除做到一半失败时不会把已经删掉的目录加回来。动手前会把计划删除的 id 列表写进日志。
 
 ### 0.1.1 · 2026-08-18
 

@@ -69,6 +69,7 @@ const CSS = [
   '.sp_modalActions .sp_mini{min-height:32px;padding:6px 14px;font-size:13px}',
   '.sp_empty{margin:8px 0;font-size:13px;color:var(--dsw-alias-label-tertiary)}',
   '.sp_error{margin:0 12px 8px;font-size:12px;color:#ef4444}',
+  '.sp_modal .sp_error{margin:0}',
   '.sp_edit{display:flex;flex-direction:column;gap:8px}',
   '.sp_area{min-height:96px;resize:vertical;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}',
   '.sp_input{box-sizing:border-box;width:100%;padding:6px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}',
@@ -86,7 +87,9 @@ const en = {
   blankHint: 'Empty draft — send a message first.',
   restore: 'Restore',
   delete: 'Delete',
-  confirm: 'Delete this session? The log cannot be recovered.',
+  confirm: 'This also deletes {count} sub-agent session(s). The logs cannot be recovered.',
+  confirmLoading: 'Checking how many sub-agent sessions this deletes…',
+  open: 'This session is still open in this process. Close it before deleting.',
   cancel: 'Cancel',
   close: 'Close',
   hide: 'Archive',
@@ -109,7 +112,9 @@ const zh = {
   blankHint: '还是空白草稿，没有对话可归档。',
   restore: '恢复',
   delete: '删除',
-  confirm: '确定删除这个会话？日志无法恢复。',
+  confirm: '这会一并删除 {count} 个子代理会话。日志无法恢复。',
+  confirmLoading: '正在统计要删除的子代理会话…',
+  open: '这个会话还在当前进程里打开着，请先关闭再删除。',
   cancel: '取消',
   close: '关闭',
   hide: '归档',
@@ -259,10 +264,17 @@ function sessionRow(ctx: any, sessionId: string | undefined) {
   return sessionList(ctx)?.byId?.[sessionId]
 }
 
+function presentTitle(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  return text.length > 0 ? text : undefined
+}
+
 function titleOf(ctx: any, sessionId: string, t?: Translate) {
   const row = sessionRow(ctx, sessionId)
   if (row?.blank) return t?.('newSession') ?? '新会话'
-  return row?.displayTitle ?? row?.title ?? sessionId
+  // Durable title wins. displayTitle is only the fallback (Hsia97, PR #1).
+  return presentTitle(row?.title) ?? presentTitle(row?.displayTitle) ?? sessionId
 }
 
 function leaveIfCurrent(ctx: any, sessionId: string) {
@@ -406,6 +418,8 @@ export function apply(ctx: any) {
     const workspaces = useStore<{ archivedSessionIds?: string[] }>(ctx.workspaces?.list)
     const [rows, setRows] = useState<ArchivedRow[]>([])
     const [busy, setBusy] = useState(false)
+    const [preview, setPreview] = useState<{ id: string; count: number } | null>(null)
+    const [previewError, setPreviewError] = useState<string>()
     const currentId = currentSessionId(sessions)
     const currentSummary = currentId ? sessions?.byId?.[currentId] : undefined
     const currentIsBlank = currentSummary?.blank === true
@@ -434,6 +448,30 @@ export function apply(ctx: any) {
     }, [state?.open, workspaces?.archivedSessionIds, sessions?.ids])
 
     useEffect(() => {
+      const id = state?.pendingDelete
+      if (!id) {
+        setPreview(null)
+        setPreviewError(undefined)
+        return
+      }
+      let cancelled = false
+      setPreview(null)
+      setPreviewError(undefined)
+      readApi<{ descendantCount: number }>(
+        `/api/session-plus/delete-preview?sessionId=${encodeURIComponent(id)}`,
+      )
+        .then((body) => {
+          if (!cancelled) setPreview({ id, count: body.descendantCount ?? 0 })
+        })
+        .catch((error: Error) => {
+          if (!cancelled) setPreviewError(error.message)
+        })
+      return () => {
+        cancelled = true
+      }
+    }, [state?.pendingDelete])
+
+    useEffect(() => {
       if (!state?.pendingDelete) return
       const onKey = (event: KeyboardEvent) => {
         if (event.key !== 'Escape') return
@@ -457,7 +495,8 @@ export function apply(ctx: any) {
       } catch (error) {
         const err = error as Error & { code?: string }
         panel.update((draft) => {
-          draft.error = err.code === 'running' ? t('running') : err.message
+          draft.error =
+            err.code === 'running' ? t('running') : err.code === 'open' ? t('open') : err.message
         })
       } finally {
         setBusy(false)
@@ -468,22 +507,24 @@ export function apply(ctx: any) {
 
     const pendingId = state.pendingDelete
     const pendingName = pendingId ? titleOf(ctx, pendingId, t) : ''
+    const previewReady = Boolean(pendingId && preview?.id === pendingId)
 
     function cancelDelete() {
       panel.update((draft) => {
         draft.pendingDelete = undefined
+        draft.error = undefined
       })
     }
 
     function confirmDelete() {
-      if (!pendingId || busy) return
+      if (!pendingId || busy || !previewReady) return
       run(async () => {
         await waitUntilIdle(ctx, pendingId)
-        leaveIfCurrent(ctx, pendingId)
         await readApi('/api/session-plus/delete', {
           method: 'POST',
           body: JSON.stringify({ sessionId: pendingId, confirm: true }),
         })
+        leaveIfCurrent(ctx, pendingId)
         setRows((current) => current.filter((row) => row.id !== pendingId))
         panel.update((draft) => {
           draft.pendingDelete = undefined
@@ -563,6 +604,7 @@ export function apply(ctx: any) {
                       onAsk={() =>
                         panel.update((draft) => {
                           draft.pendingDelete = currentId
+                          draft.error = undefined
                         })
                       }
                     />
@@ -605,6 +647,7 @@ export function apply(ctx: any) {
                         onAsk={() =>
                           panel.update((draft) => {
                             draft.pendingDelete = row.id
+                            draft.error = undefined
                           })
                         }
                       />
@@ -624,8 +667,9 @@ export function apply(ctx: any) {
               {pendingName}
             </p>
             <p className="sp_modalMsg" id="sp-del-msg">
-              {t('confirm')}
+              {previewReady ? t('confirm', { count: preview?.count ?? 0 }) : previewError ?? t('confirmLoading')}
             </p>
+            {state.error ? <p className="sp_error">{state.error}</p> : null}
             <div className="sp_modalActions">
               <button type="button" className="sp_mini" autoFocus disabled={busy} onClick={cancelDelete}>
                 {t('cancel')}
@@ -634,7 +678,7 @@ export function apply(ctx: any) {
                 type="button"
                 className="sp_mini sp_danger"
                 style={{ background: '#ef4444', backgroundColor: '#ef4444', borderColor: '#ef4444', color: '#fff' }}
-                disabled={busy}
+                disabled={busy || !previewReady}
                 onClick={confirmDelete}
               >
                 {t('delete')}

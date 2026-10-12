@@ -46,11 +46,14 @@ function harness(options: {
   live?: ReadonlySet<string>
   running?: ReadonlySet<string>
   titles?: Record<string, string>
+  /** Session ids whose title observation is rejected. */
+  titleFailures?: readonly string[]
 }) {
   const logs: string[] = []
   const archived: string[] = []
   const routes = new Map<string, FetchRoute>()
   const webRoutes: WebRoute[] = []
+  let titleReads = 0
   const ctx = {
     logger: () => ({
       info: (...args: unknown[]) => {
@@ -64,9 +67,19 @@ function harness(options: {
     get(name: string) {
       if (name !== 'sessionQuery' || !options.titles) return undefined
       return {
-        async readTitle(id: string) {
-          const title = options.titles?.[id]
-          return title ? { title } : undefined
+        async readTitleSnapshots(ids: readonly string[]) {
+          titleReads += 1
+          return ids.map((id) => {
+            if (options.titleFailures?.includes(id)) {
+              return { sessionId: id, status: 'rejected' as const, reason: new Error('title') }
+            }
+            const title = options.titles?.[id]
+            return {
+              sessionId: id,
+              status: 'fulfilled' as const,
+              value: title ? { title: { title } } : {},
+            }
+          })
         },
       }
     },
@@ -150,7 +163,13 @@ function harness(options: {
     return { status: response.status, json, text }
   }
 
-  return { call, logs, archived, routes }
+  return {
+    call,
+    logs,
+    archived,
+    routes,
+    titleReads: () => titleReads,
+  }
 }
 
 async function writeSession(root: string, id: string, cwd = '/workspace', compressed = false) {
@@ -421,20 +440,35 @@ test('a stale descendant list is 409 and a missing directory is 404', async () =
   }
 })
 
-test('archive rows include the log-backed title', async () => {
+test('archive rows include log-backed titles from one batch read', async () => {
   const root = await mkdtemp(join(tmpdir(), 'sp-root-'))
   try {
     await writeSession(root, 'sp-titled')
+    await writeSession(root, 'sp-other')
+    await writeSession(root, 'sp-untitled')
     const host = harness({
       root,
-      listed: [{ header: { id: 'sp-titled', cwd: '/workspace' }, revision: '1' }],
-      titles: { 'sp-titled': 'Edited branch' },
+      listed: [
+        { header: { id: 'sp-titled', cwd: '/workspace' }, revision: '1' },
+        { header: { id: 'sp-other', cwd: '/workspace' }, revision: '1' },
+        { header: { id: 'sp-untitled', cwd: '/workspace' }, revision: '1' },
+      ],
+      titles: { 'sp-titled': 'Edited branch', 'sp-other': 'Second' },
+      titleFailures: ['sp-untitled'],
     })
-    host.archived.push('sp-titled')
+    host.archived.push('sp-titled', 'sp-other', 'sp-untitled')
     const listed = await host.call('GET', '/api/session-plus/archived')
     assert.equal(listed.status, 200)
     const sessions = listed.json.sessions as { id: string; title?: string }[]
-    assert.equal(sessions[0]?.title, 'Edited branch')
+    assert.deepEqual(
+      sessions.map((row) => [row.id, row.title]),
+      [
+        ['sp-titled', 'Edited branch'],
+        ['sp-other', 'Second'],
+        ['sp-untitled', undefined],
+      ],
+    )
+    assert.equal(host.titleReads(), 1)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

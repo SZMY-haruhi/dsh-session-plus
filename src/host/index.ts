@@ -179,43 +179,65 @@ async function logStillOnDisk(ctx: HostContext, sessionId: string, byId: Map<str
   }
 }
 
+type TitleObservationResult =
+  | {
+      sessionId: string
+      status: 'fulfilled'
+      value?: { title?: { title?: unknown } }
+    }
+  | {
+      sessionId: string
+      status: 'rejected'
+    }
+
 /**
  * Durable titles live in `session/title` events, not in the log header.
  * The archive panel reads `ctx.sessions.list` first (`title`, then
- * `displayTitle`). This field is the same log-backed title from
- * `sessionQuery.readTitle`, for a row whose client projection has not arrived.
+ * `displayTitle`). These fields are the same log-backed titles from one
+ * `sessionQuery.readTitleSnapshots` call, for rows whose client projection
+ * has not arrived. A rejected observation omits that row's title.
  */
-async function durableTitle(ctx: HostContext, sessionId: string): Promise<string | undefined> {
-  const query = ctx.get('sessionQuery') as { readTitle?: (id: string) => Promise<unknown> } | undefined
-  if (typeof query?.readTitle !== 'function') return undefined
+async function durableTitles(ctx: HostContext, sessionIds: readonly string[]): Promise<Map<string, string>> {
+  const titles = new Map<string, string>()
+  if (sessionIds.length === 0) return titles
+  const query = ctx.get('sessionQuery') as
+    | { readTitleSnapshots?: (ids: readonly string[]) => Promise<readonly TitleObservationResult[]> }
+    | undefined
+  if (typeof query?.readTitleSnapshots !== 'function') return titles
+  let results: readonly TitleObservationResult[]
   try {
-    const snapshot = await query.readTitle(sessionId)
-    if (snapshot === null || typeof snapshot !== 'object') return undefined
-    const title = (snapshot as { title?: unknown }).title
-    return typeof title === 'string' && title.trim().length > 0 ? title : undefined
+    results = await query.readTitleSnapshots(sessionIds)
   } catch {
-    return undefined
+    return titles
   }
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue
+    const title = result.value?.title?.title
+    if (typeof title === 'string' && title.trim().length > 0) titles.set(String(result.sessionId), title)
+  }
+  return titles
 }
 
 async function listArchived(ctx: HostContext): Promise<ArchivedRow[]> {
   const ids = ctx.workspaceRegistry.archivedSessionIds.map(String)
   const byId = await listedHeaders(ctx)
-  const rows: ArchivedRow[] = []
+  const pending: ArchivedRow[] = []
   for (const id of ids) {
     if (!stillStored(ctx, id, byId) || !(await logStillOnDisk(ctx, id, byId))) continue
     const agent = ctx.agents.get(id)
     const header = byId.get(id) ?? ctx.sessions.get(id)?.header
-    const title = await durableTitle(ctx, id)
-    rows.push({
+    pending.push({
       id,
       cwd: header?.cwd,
-      ...(title ? { title } : {}),
       live: Boolean(ctx.sessions.get(id) || agent),
       running: agent?.status === 'running',
     })
   }
-  return rows
+  const titles = await durableTitles(ctx, pending.map((row) => row.id))
+  return pending.map((row) => {
+    const title = titles.get(row.id)
+    return title ? { ...row, title } : row
+  })
 }
 
 async function assertIdle(ctx: HostContext, sessionId: string) {

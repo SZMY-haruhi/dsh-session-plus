@@ -148,7 +148,7 @@ dsh plugin --profile web add .
 - 确认框先向 `GET /api/session-plus/delete-preview` 要子代理 id。删除请求把这份 id 带回去，对不上就 409，不删
 - 计划里的目录缺失时返回 404，不会先归档再报成功
 - `ctx.sessions` 里还握着计划删除的任何一个 id 时，删除返回 409，不关 handle，也不删目录。正在跑的会话同样是 409
-- 归档列表的名字先用客户端会话列表里的持久 `title`，没有再用接口带回的 `session/title`，最后才是 `displayTitle`。这个顺序来自 [Hsia97](https://github.com/Hsia97) 的 PR #1。归档不会把会话从客户端 `byId` 里拿掉
+- 归档列表的名字先用客户端会话列表里的持久 `title`，没有再用接口带回的 `session/title`，最后才是 `displayTitle`。这个顺序来自 [Hsia97](https://github.com/Hsia97) 的 PR #1。宿主用一次 `sessionQuery.readTitleSnapshots` 取回这些标题。归档不会把会话从客户端 `byId` 里拿掉
 - 确认框的层叠高于归档面板；侧栏按钮不再用负外边距撑出脚栏
 - 订阅 workspace / session 列表时保留 `getSnapshot` 的 `this`
 - 需要 Node.js >= 22.15（`zstdDecompressSync`）。更早的 22 会明确失败，而不是归档成功却留下日志

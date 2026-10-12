@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
 type ArchivedRow = {
   id: string
@@ -25,10 +25,10 @@ type PanelState = {
 type Translate = (key: string, params?: Record<string, unknown>) => string
 
 const CSS = [
-  '.sp_btn{box-sizing:border-box;appearance:none;border:0;background:transparent;font:inherit;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);cursor:pointer;display:flex;align-items:center;gap:8px;flex:none;width:calc(100% + 4px);height:42px;margin:4px -2px;padding:0 10px 0 8px;border-radius:12px;overflow:hidden}',
+  '.sp_btn{box-sizing:border-box;appearance:none;border:0;background:transparent;font:inherit;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);cursor:pointer;display:flex;align-items:center;gap:8px;flex:none;width:100%;height:38px;margin:0;padding:0 10px;border-radius:10px;overflow:hidden}',
   '.sp_btn:hover{background:var(--dsw-alias-interactive-bg-hover)}',
   '.sp_btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
-  '.sp_btnRail{border-radius:50%;justify-content:center;gap:0;width:36px;height:36px;margin:8px 0 10px;padding:0}',
+  '.sp_btnRail{border-radius:50%;justify-content:center;gap:0;width:36px;height:36px;margin:0 auto;padding:0}',
   '.sp_btnRail .sp_icon{width:18px;height:18px}',
   '.sp_icon{width:16px;height:16px;flex:none}',
   '.sp_label{white-space:nowrap;overflow:hidden;font-size:14px;line-height:22px;color:inherit}',
@@ -43,7 +43,7 @@ const CSS = [
   '.sp_branchPop{position:absolute;right:0;bottom:calc(100% + 6px);z-index:20;width:min(320px,calc(100vw - 48px));display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3);box-shadow:0 12px 32px rgba(0,0,0,.28)}',
   '.sp_branchPop .sp_area{min-height:72px;width:100%;box-sizing:border-box}',
   '.sp_branchPop .sp_empty,.sp_branchPop .sp_error{margin:0}',
-  '.sp_layer{position:fixed;inset:0;z-index:40;pointer-events:none}',
+  '.sp_layer{position:fixed;inset:0;z-index:1000;pointer-events:none}',
   '.sp_scrim{position:absolute;inset:0;pointer-events:auto;background:rgba(0,0,0,.24)}',
   '.sp_panel{position:absolute;top:12px;bottom:12px;left:12px;width:min(360px,calc(100vw - 24px));pointer-events:auto;display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3);box-shadow:0 12px 40px rgba(0,0,0,.28);overflow:hidden}',
   '.sp_head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2)}',
@@ -60,7 +60,7 @@ const CSS = [
   '.sp_mini.sp_danger,.sp_mini.sp_danger:hover,.sp_mini.sp_danger:focus,.sp_mini.sp_danger:focus-visible,.sp_mini.sp_danger:disabled{border:1px solid #ef4444 !important;background:#ef4444 !important;background-color:#ef4444 !important;color:#fff !important;filter:none}',
   '.sp_mini.sp_danger:hover,.sp_mini.sp_danger:focus,.sp_mini.sp_danger:focus-visible{border-color:#f87171 !important;background:#f87171 !important;background-color:#f87171 !important}',
   '.sp_mini.sp_danger:disabled{opacity:.55}',
-  '.sp_modalLayer{position:fixed;inset:0;z-index:80;pointer-events:auto;display:flex;align-items:center;justify-content:center}',
+  '.sp_modalLayer{position:fixed;inset:0;z-index:1100;pointer-events:auto;display:flex;align-items:center;justify-content:center}',
   '.sp_modalScrim{position:absolute;inset:0;appearance:none;border:0;padding:0;margin:0;background:rgba(0,0,0,.48);cursor:default}',
   '.sp_modal{position:relative;z-index:1;width:min(400px,calc(100vw - 48px));display:flex;flex-direction:column;gap:10px;padding:20px 20px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:var(--dsw-alias-bg-layer-3);box-shadow:0 20px 56px rgba(0,0,0,.45)}',
   '.sp_modalName{margin:0;font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary);word-break:break-word}',
@@ -176,8 +176,31 @@ function createPanelStore(init: PanelState) {
   }
 }
 
-function useStore<T>(store: { getSnapshot: () => T; subscribe: (fn: () => void) => () => void }) {
-  return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+const missingStore = {
+  subscribe(listener: () => void) {
+    void listener
+    return () => {}
+  },
+  getSnapshot() {
+    return undefined
+  },
+}
+
+/**
+ * Call getSnapshot as a method. Passing the unbound function into
+ * useSyncExternalStore drops `this` on controller stores.
+ * The hook itself always runs; a missing store reads as undefined.
+ */
+function useStore<T>(
+  store: { getSnapshot: () => T; subscribe: (fn: () => void) => () => void } | null | undefined,
+): T | undefined {
+  const bound =
+    store && typeof store.subscribe === 'function' && typeof store.getSnapshot === 'function'
+      ? store
+      : missingStore
+  const subscribe = useCallback((onStoreChange: () => void) => bound.subscribe(onStoreChange), [bound])
+  const getSnapshot = useCallback(() => bound.getSnapshot() as T | undefined, [bound])
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
 async function readApi<T>(path: string, init?: RequestInit): Promise<T> {
@@ -198,11 +221,42 @@ async function readApi<T>(path: string, init?: RequestInit): Promise<T> {
   return body
 }
 
+type SessionListSnap = {
+  current?: string
+  ids?: string[]
+  byId?: Record<
+    string,
+    {
+      displayTitle?: string
+      title?: string
+      blank?: boolean
+      running?: boolean
+      retainedBy?: { mainView?: number }
+    }
+  >
+}
+
+function sessionList(ctx: any): SessionListSnap | undefined {
+  return ctx.sessions?.list?.getSnapshot?.() as SessionListSnap | undefined
+}
+
+function currentSessionId(list: SessionListSnap | undefined): string | undefined {
+  if (!list) return undefined
+  if (typeof list.current === 'string' && list.current.length > 0) return list.current
+  const byId = list.byId ?? {}
+  const ids = list.ids ?? Object.keys(byId)
+  for (const id of ids) {
+    if ((byId[id]?.retainedBy?.mainView ?? 0) > 0) return id
+  }
+  for (const [id, row] of Object.entries(byId)) {
+    if ((row?.retainedBy?.mainView ?? 0) > 0) return id
+  }
+  return undefined
+}
+
 function sessionRow(ctx: any, sessionId: string | undefined) {
   if (!sessionId) return undefined
-  return ctx.sessions.list.getSnapshot().byId?.[sessionId] as
-    | { displayTitle?: string; title?: string; blank?: boolean }
-    | undefined
+  return sessionList(ctx)?.byId?.[sessionId]
 }
 
 function titleOf(ctx: any, sessionId: string, t?: Translate) {
@@ -212,7 +266,20 @@ function titleOf(ctx: any, sessionId: string, t?: Translate) {
 }
 
 function leaveIfCurrent(ctx: any, sessionId: string) {
-  if (ctx.sessions.list.getSnapshot().current === sessionId) ctx.sessions.clear()
+  if (currentSessionId(sessionList(ctx)) !== sessionId) return
+  if (typeof ctx.uiWorkspace?.startSession === 'function') {
+    ctx.uiWorkspace.startSession()
+    return
+  }
+  ctx.sessions?.clear?.()
+}
+
+function openSession(ctx: any, sessionId: string) {
+  if (typeof ctx.uiWorkspace?.openSession === 'function') {
+    ctx.uiWorkspace.openSession(sessionId)
+    return
+  }
+  ctx.sessions?.open?.(sessionId)
 }
 
 function wait(ms: number) {
@@ -220,16 +287,24 @@ function wait(ms: number) {
 }
 
 function sessionIsBusy(ctx: any, sessionId: string) {
-  if (ctx.sessions.list.getSnapshot().byId?.[sessionId]?.running === true) return true
-  const snap = ctx.sessions.binding(sessionId)?.session?.getSnapshot?.() as
+  if (sessionList(ctx)?.byId?.[sessionId]?.running === true) return true
+  const snap = ctx.sessions?.binding?.(sessionId)?.session?.getSnapshot?.() as
     | {
         running?: boolean
         partial?: unknown
         runningCalls?: readonly unknown[]
+        awaitingFirstTurn?: boolean
+        pendingSubmissions?: readonly unknown[]
       }
     | undefined
   if (!snap) return false
-  return snap.running === true || snap.partial != null || (snap.runningCalls?.length ?? 0) > 0
+  return (
+    snap.running === true ||
+    snap.awaitingFirstTurn === true ||
+    (snap.pendingSubmissions?.length ?? 0) > 0 ||
+    snap.partial != null ||
+    (snap.runningCalls?.length ?? 0) > 0
+  )
 }
 
 async function waitUntilIdle(ctx: any, sessionId: string) {
@@ -253,18 +328,20 @@ function textBlocks(content: readonly { type?: string; text?: string }[] | undef
 
 function sessionSnapshot(ctx: any, sessionId: string | undefined) {
   if (!sessionId) return undefined
-  return ctx.sessions.binding(sessionId)?.session?.getSnapshot?.()
+  return ctx.sessions?.binding?.(sessionId)?.session?.getSnapshot?.()
 }
 
 function atSeqBeforeUser(snapshot: any, node: any): number | undefined {
   const seq = typeof node?.data?.seq === 'number' ? node.data.seq : undefined
   const loc = node?.location
-  const turn = loc?.kind === 'turn' || loc?.kind === 'step' ? loc.turn?.turn : undefined
-  if (typeof turn === 'number' && turn > 1) {
-    const end = snapshot?.turnEnds?.get?.(turn - 1)
+  const turnNumber = loc?.kind === 'turn' || loc?.kind === 'step' ? loc.turn?.turn : undefined
+  if (typeof turnNumber === 'number' && turnNumber > 1) {
+    const end = snapshot?.turnEnds?.get?.(turnNumber - 1)
     if (typeof end === 'number') return end
   }
-  if (typeof seq === 'number' && seq > 1) return seq - 1
+  const turnStart = loc?.kind === 'turn' || loc?.kind === 'step' ? loc.turn?.start?.seq : undefined
+  if (typeof seq === 'number' && seq > 0) return seq - 1
+  if (typeof turnStart === 'number' && turnStart > 0) return turnStart - 1
   return undefined
 }
 
@@ -280,14 +357,14 @@ function draftFromUserNode(snapshot: any, node: any, sessionId: string): EditDra
 }
 
 function officialUserRenderer(ctx: any) {
-  const entries = ctx.slots.entries('conversation.chat.node') as Array<{
+  const entries = (ctx.slots?.entries?.('conversation.chat.node') ?? []) as Array<{
     component?: unknown
     options?: { key?: string; priority?: number }
   }>
   return entries.find((entry) => entry.options?.key === 'user' && (entry.options?.priority ?? 0) === 0)?.component
 }
 
-export const inject = ['slots', 'locale', 'sessions', 'workspaces']
+export const inject = ['slots', 'locale', 'sessions', 'workspaces', 'uiWorkspace']
 
 export function apply(ctx: any) {
   const tPlus = ctx.locale.bind('session-plus')
@@ -307,7 +384,7 @@ export function apply(ctx: any) {
         type="button"
         className={props.wide ? 'sp_btn' : 'sp_btn sp_btnRail'}
         aria-label={t('archive')}
-        aria-pressed={state.open}
+        aria-pressed={state?.open ?? false}
         onClick={() =>
           panel.update((draft) => {
             draft.open = !draft.open
@@ -325,24 +402,20 @@ export function apply(ctx: any) {
   function Overlay(props: { t?: Translate }) {
     const t = props.t ?? ((key: string) => (zh as Record<string, string>)[key] ?? key)
     const state = useStore(panel)
-    const sessions = useStore<{
-      current?: string
-      ids?: string[]
-      byId?: Record<string, { displayTitle?: string; title?: string; blank?: boolean }>
-    }>(ctx.sessions.list)
-    const workspaces = useStore<{ archivedSessionIds?: string[] }>(ctx.workspaces.list)
+    const sessions = useStore<SessionListSnap>(ctx.sessions?.list)
+    const workspaces = useStore<{ archivedSessionIds?: string[] }>(ctx.workspaces?.list)
     const [rows, setRows] = useState<ArchivedRow[]>([])
     const [busy, setBusy] = useState(false)
-    const currentId = sessions.current as string | undefined
-    const currentSummary = currentId ? sessions.byId?.[currentId] : undefined
+    const currentId = currentSessionId(sessions)
+    const currentSummary = currentId ? sessions?.byId?.[currentId] : undefined
     const currentIsBlank = currentSummary?.blank === true
     const archivedIds = useMemo(
-      () => new Set((workspaces.archivedSessionIds ?? []).map(String)),
-      [workspaces.archivedSessionIds],
+      () => new Set((workspaces?.archivedSessionIds ?? []).map(String)),
+      [workspaces?.archivedSessionIds],
     )
 
     useEffect(() => {
-      if (!state.open) return
+      if (!state?.open) return
       let cancelled = false
       readApi<{ sessions: ArchivedRow[] }>('/api/session-plus/archived')
         .then((body) => {
@@ -358,10 +431,10 @@ export function apply(ctx: any) {
       return () => {
         cancelled = true
       }
-    }, [state.open, workspaces.archivedSessionIds, sessions.ids])
+    }, [state?.open, workspaces?.archivedSessionIds, sessions?.ids])
 
     useEffect(() => {
-      if (!state.pendingDelete) return
+      if (!state?.pendingDelete) return
       const onKey = (event: KeyboardEvent) => {
         if (event.key !== 'Escape') return
         event.preventDefault()
@@ -372,7 +445,7 @@ export function apply(ctx: any) {
       }
       window.addEventListener('keydown', onKey, true)
       return () => window.removeEventListener('keydown', onKey, true)
-    }, [state.pendingDelete])
+    }, [state?.pendingDelete])
 
     async function run(action: () => Promise<void>) {
       setBusy(true)
@@ -391,7 +464,7 @@ export function apply(ctx: any) {
       }
     }
 
-    if (!state.open) return null
+    if (!state?.open) return null
 
     const pendingId = state.pendingDelete
     const pendingName = pendingId ? titleOf(ctx, pendingId, t) : ''
@@ -427,12 +500,18 @@ export function apply(ctx: any) {
           type="button"
           className="sp_scrim"
           aria-label={t('close')}
-          onClick={() =>
+          onClick={() => {
+            if (panel.getSnapshot().pendingDelete) {
+              panel.update((draft) => {
+                draft.pendingDelete = undefined
+              })
+              return
+            }
             panel.update((draft) => {
               draft.open = false
               draft.pendingDelete = undefined
             })
-          }
+          }}
         />
         <aside className="sp_panel" role="dialog" aria-label={t('title')}>
           <div className="sp_head">
@@ -471,7 +550,7 @@ export function apply(ctx: any) {
                       onClick={() =>
                         run(async () => {
                           await waitUntilIdle(ctx, currentId)
-                          await ctx.workspaces.archiveSession(currentId)
+                          await ctx.workspaces?.archiveSession?.(currentId)
                           leaveIfCurrent(ctx, currentId)
                         })
                       }
@@ -514,7 +593,7 @@ export function apply(ctx: any) {
                               method: 'POST',
                               body: JSON.stringify({ sessionId: row.id }),
                             })
-                            if (ctx.sessions.list.getSnapshot().byId?.[row.id]) ctx.sessions.open(row.id)
+                            if (sessionList(ctx)?.byId?.[row.id]) openSession(ctx, row.id)
                           })
                         }
                       >
@@ -574,7 +653,7 @@ export function apply(ctx: any) {
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState<string>()
       const nodeKey = String(props.node?.key ?? props.node?.data?.seq ?? '')
-      const mine = state.edit?.sessionId === props.sessionId && state.edit?.nodeKey === nodeKey
+      const mine = state?.edit?.sessionId === props.sessionId && state?.edit?.nodeKey === nodeKey
 
       return (
         <div className="sp_userChrome">
@@ -605,7 +684,7 @@ export function apply(ctx: any) {
               <BranchIcon />
               <span className="sp_tip">{tPlus('branch')}</span>
             </button>
-            {mine && state.edit ? (
+            {mine && state?.edit ? (
               <div className="sp_branchPop" role="dialog" aria-label={tPlus('branch')}>
                 <p className="sp_empty">{tPlus('branchHint')}</p>
                 <input
@@ -662,8 +741,15 @@ export function apply(ctx: any) {
                             atSeq: edit.atSeq,
                             increaseTitle: customTitle.length === 0,
                           })
-                          ctx.sessions.open(childId)
-                          const child = ctx.sessions.binding(childId)?.session
+                          // The web client has no sessions.open(). The workspace
+                          // service retains the child on the main view, which is
+                          // what makes sessions.binding() available.
+                          openSession(ctx, childId)
+                          let child = ctx.sessions.binding(childId)?.session
+                          for (let i = 0; !child && i < 50; i++) {
+                            await wait(100)
+                            child = ctx.sessions.binding(childId)?.session
+                          }
                           if (!child) throw new Error('forked session is not ready')
                           if (customTitle.length > 0) {
                             const renamed = await child.rename(customTitle)

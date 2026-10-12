@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-plus",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "DSH session completion: sidebar archive directory, restore, delete, edit-and-resend",
   "repository": {
@@ -50,13 +50,14 @@
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-web": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-web": ">=0.1.7-rc.1",
     "react": "^18.2.0"
   },
   "devDependencies": {
@@ -70,6 +71,7 @@
   "scripts": {
     "build": "tsc --noEmit && tsdown && node scripts/wrap-client.mjs",
     "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/session-files.test.ts",
     "prepublishOnly": "pnpm build"
   },
   "engines": {

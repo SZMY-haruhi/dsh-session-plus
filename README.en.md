@@ -45,7 +45,7 @@ So: **do not archive while a tool is still running.** Wait for the turn to finis
 
 ## Install
 
-npm (stable, [official recommendation](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish)). Please take **0.1.1** — the npm `0.1.0` was only a name-hold, not this codebase.
+npm (stable, [official recommendation](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish)). Please take **0.1.2**. The npm `0.1.0` was only a name-hold. `0.1.1` still reads `list()` as raw headers and deletes through `locate()`, which does not match DSH 0.1.5+ session logs.
 
 ```sh
 dsh plugin --profile web add dsh-session-plus
@@ -81,8 +81,8 @@ dsh plugin --profile web remove dsh-session-plus
 
 - Archive directory: the official `archivedSessionIds` set, not a shadow list I invented
 - Restore: drop the id from that set; workspace `sessionIds` accounting is kept on archive, so the session returns to its original slot
-- Delete: centered confirm (red delete), detach workspace accounting, remove the session log (including the `.zstd` sibling and the session directory); do not unarchive after rm, so the card cannot ghost back into the list
-- If the deleted session is the current one: `sessions.clear()` to a blank New session — not `connectWorkspace` (that felt like “return to workspace”)
+- Delete: centered confirm (red delete) stacked above the archive panel. Detach workspace accounting and remove the whole session directory: v0 `session.jsonl[.zstd]`, the `session.v3.jsonl[.zstd]` files from 0.1.5, and the current `session.v4.jsonl[.zstd]`. Subagent sessions (`origin: "subagent"` on the header) go with the parent. An edit-and-branch fork also stores `parentSession`, but it is not a subagent and stays on disk. Nothing is unarchived after the delete, so the card cannot ghost back into the list
+- If the deleted session is the current one: open a new blank session in the current workspace (`uiWorkspace.startSession`). Older hosts that still expose `sessions.clear()` use that instead
 - Blank New session: no archive, no delete
 - Branch conversation: Y-fork-with-arrows icon beside your message (not the official git-branch dots) → nearby popover to edit the prompt, optional new title, empty falls back to official `increaseTitle` `(1)` `(2)` → `sessions.fork` then send; the old session stays
 - One entry, one operation surface; I am not building a settings-page session OS (export, pause, compaction, AI rename)
@@ -109,7 +109,7 @@ dsh plugin --profile web remove dsh-session-plus
 | --- | --- | --- |
 | Archive | official `workspaces.archiveSession` | hidden from grouping; accounting kept |
 | Restore | write workspace-domain `archivedSessionIds` | back in the original workspace slot |
-| Delete | detach + delete persistence file | irreversible |
+| Delete | detach + delete the session directory (generations and subagents) | irreversible; forks stay |
 | Branch conversation | `fork` + `prompt` | new session = prefix + edited prompt + new answer |
 
 ## Out of scope
@@ -127,9 +127,21 @@ pnpm build
 dsh plugin --profile web add .
 ```
 
-`pnpm pack` builds the tarball I would send to npm. Install this cut with `dsh plugin --profile web add ./dsh-session-plus-0.1.1.tgz`.
+`pnpm pack` builds the tarball I would send to npm. Install this cut with `dsh plugin --profile web add ./dsh-session-plus-0.1.2.tgz`.
 
 ## Changelog
+
+### 0.1.2 · 2026-10-12
+
+Match session persistence after DSH 0.1.5, checked against 0.2.0-rc.2:
+
+- `sessionPersistence.list()` returns `{ header, revision, eventCount?, sizeBytes? }` instead of raw headers
+- The persistence seam no longer exposes `locate()`. Delete follows the JSONL directory layout and removes every generation in the session directory
+- Deleting a parent also deletes `origin: "subagent"` children. Forks are not deleted
+- The confirm dialog stacks above the archive panel. The sidebar button no longer uses a negative margin that overflows the footer
+- Session and workspace subscriptions keep `this` on `getSnapshot`
+
+The list-unwrapping direction, and the idea of cleaning subagent sessions, come from [Hsia97](https://github.com/Hsia97)'s PR #1. That change cascaded on every `parentSession`, which also deletes edit-and-branch forks. This cut does not do that.
 
 ### 0.1.1 · 2026-08-18
 
@@ -165,6 +177,8 @@ I read these MIT repositories as design references. Ideas only; I did not copy t
 - [Moeblack/dsh-message-edit](https://github.com/Moeblack/dsh-message-edit)
 - [cindyguyuehu123/dsh-webchatlike](https://github.com/cindyguyuehu123/dsh-webchatlike) (interaction model; this plugin does not patch core packages)
 - [dylan121322/dsh-session-unarchive](https://github.com/dylan121322/dsh-session-unarchive) (restore-to-original-slot idea)
+
+List unwrapping for DSH 0.1.5+ and subagent cleanup follow the direction of [Hsia97](https://github.com/Hsia97)'s [PR #1](https://github.com/SZMY-haruhi/dsh-session-plus/pull/1).
 
 I do not treat repositories without a LICENSE as copyable source. Public contracts are listed in `NOTICE`.
 

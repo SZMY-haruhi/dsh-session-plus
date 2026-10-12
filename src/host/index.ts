@@ -1,7 +1,16 @@
-import { access, rm, rmdir } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readdir, rm } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
+import {
+  encodeSegment,
+  indexHeaders,
+  isCanonicalSessionLog,
+  isInsideRoot,
+  resolveOwnedSessionDir,
+  subagentDescendants,
+  type SessionHeaderLike,
+} from './session-files'
 
 export const name = 'dsh-session-plus'
 
@@ -14,11 +23,6 @@ export const inject = [
   'agents',
 ]
 
-type SessionHeaderLike = {
-  id: string
-  cwd?: string
-}
-
 type RegistryState = {
   archivedSessionIds: string[]
   [key: string]: unknown
@@ -26,7 +30,8 @@ type RegistryState = {
 
 type RegistryInternals = {
   archivedSessionIds: readonly string[]
-  archiveSession(sessionId: string): Promise<void>
+  archiveSession(sessionId: string, options?: { stopActivity?: boolean }): Promise<void>
+  unarchiveSession(sessionId: string): Promise<void>
   enqueueOperation<T>(operation: () => Promise<T>): Promise<T>
   requireState(): RegistryState
   setState(state: RegistryState): Promise<void>
@@ -39,12 +44,16 @@ type AgentLike = {
   whenIdle(): Promise<void>
 }
 
+type PersistenceService = {
+  list(options?: { signal?: AbortSignal } | AbortSignal): Promise<readonly unknown[]>
+  locate?(header: SessionHeaderLike): { path: string } | undefined
+  config?: { root?: unknown }
+  root?: unknown
+}
+
 type HostContext = Context & {
   workspaceRegistry: RegistryInternals
-  sessionPersistence: {
-    list(signal?: AbortSignal): Promise<SessionHeaderLike[]>
-    locate(header: SessionHeaderLike): { path: string } | undefined
-  }
+  sessionPersistence: PersistenceService
   webServer: {
     register(route: {
       kind: 'exact' | 'prefix'
@@ -104,29 +113,109 @@ function pathnameOf(req: IncomingMessage): string {
   return url.pathname.replace(/\/+$/, '') || '/'
 }
 
-async function writeArchived(ctx: HostContext, archivedSessionIds: string[]) {
+function namedError(name: string, message: string) {
+  const error = new Error(message)
+  error.name = name
+  return error
+}
+
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : ''
+}
+
+async function unarchiveSession(ctx: HostContext, sessionId: string) {
+  if (typeof ctx.workspaceRegistry.unarchiveSession === 'function') {
+    await ctx.workspaceRegistry.unarchiveSession(sessionId)
+    return
+  }
   const registry = ctx.workspaceRegistry
   await registry.enqueueOperation(async () => {
     const state = registry.requireState()
     await registry.setState({
       ...state,
-      archivedSessionIds,
+      archivedSessionIds: state.archivedSessionIds.map(String).filter((id) => id !== sessionId),
     })
   })
 }
 
-async function unarchiveSession(ctx: HostContext, sessionId: string) {
-  const current = ctx.workspaceRegistry.archivedSessionIds.map(String)
-  const next = current.filter((id) => id !== sessionId)
-  if (next.length === current.length) return
-  await writeArchived(ctx, next)
+function persistenceRoot(ctx: HostContext): string | undefined {
+  const service = ctx.sessionPersistence
+  const raw = service.config?.root ?? service.root
+  if (typeof raw !== 'string' || raw.trim().length === 0) return undefined
+  return resolve(raw)
 }
 
-async function findHeader(ctx: HostContext, sessionId: string): Promise<SessionHeaderLike | undefined> {
-  const live = ctx.sessions.get(sessionId)
-  if (live?.header) return live.header
-  const headers = await ctx.sessionPersistence.list()
-  return headers.find((header) => String(header.id) === sessionId)
+async function directoryHasLog(dir: string): Promise<boolean> {
+  try {
+    const names = await readdir(dir)
+    return names.some(isCanonicalSessionLog)
+  } catch {
+    return false
+  }
+}
+
+async function listedHeaders(ctx: HostContext): Promise<Map<string, SessionHeaderLike>> {
+  const listed = await ctx.sessionPersistence.list()
+  return indexHeaders(listed)
+}
+
+async function findHeader(
+  ctx: HostContext,
+  sessionId: string,
+  headers?: Map<string, SessionHeaderLike>,
+): Promise<SessionHeaderLike | undefined> {
+  const stored = headers ?? (await listedHeaders(ctx))
+  return stored.get(sessionId) ?? ctx.sessions.get(sessionId)?.header
+}
+
+async function locateLegacyDir(ctx: HostContext, header: SessionHeaderLike): Promise<string | undefined> {
+  const locate = ctx.sessionPersistence.locate
+  if (typeof locate !== 'function') return undefined
+  const location = locate.call(ctx.sessionPersistence, header)
+  if (!location?.path) return undefined
+  const dir = resolve(dirname(location.path))
+  const root = persistenceRoot(ctx)
+  if (root && !isInsideRoot(root, dir)) return undefined
+  return dir
+}
+
+/**
+ * Session directory for a header. The JSONL layout is
+ * `<root>/<project>/<encoded id>/session.vN.jsonl[.zstd]`. `locate()` is only
+ * a fallback for hosts that still expose it.
+ */
+async function findSessionDir(ctx: HostContext, header: SessionHeaderLike): Promise<string | undefined> {
+  const root = persistenceRoot(ctx)
+  if (root) {
+    let expected: string | undefined
+    try {
+      expected = resolveOwnedSessionDir(root, header)
+    } catch {
+      expected = undefined
+    }
+    if (expected && (await directoryHasLog(expected))) return expected
+    const encoded = encodeSegment(header.id)
+    const matches: string[] = []
+    let projects: { name: string; isDirectory: () => boolean }[] = []
+    try {
+      projects = await readdir(root, { withFileTypes: true })
+    } catch {
+      projects = []
+    }
+    for (const entry of projects) {
+      if (!entry.isDirectory()) continue
+      const candidate = resolve(root, entry.name, encoded)
+      if (!isInsideRoot(root, candidate)) continue
+      if (await directoryHasLog(candidate)) matches.push(candidate)
+    }
+    if (matches.length > 1) {
+      throw namedError('SessionPlusAmbiguousArtifact', 'session id matches more than one persistence directory')
+    }
+    if (matches.length === 1) return matches[0]
+  }
+  const legacy = await locateLegacyDir(ctx, header)
+  if (legacy && (await directoryHasLog(legacy))) return legacy
+  return undefined
 }
 
 async function disposeLiveAgent(ctx: HostContext, sessionId: string) {
@@ -144,27 +233,25 @@ async function disposeLiveAgent(ctx: HostContext, sessionId: string) {
 
 async function hideFromGrouping(ctx: HostContext, sessionId: string) {
   if (ctx.workspaceRegistry.archivedSessionIds.map(String).includes(sessionId)) return
-  await ctx.workspaceRegistry.archiveSession(sessionId)
-}
-
-async function deleteArtifact(ctx: HostContext, sessionId: string) {
-  const header = await findHeader(ctx, sessionId)
-  if (!header) return
-  const location = ctx.sessionPersistence.locate(header)
-  if (!location) {
-    const error = new Error('session persistence does not expose a per-session file')
-    error.name = 'SessionPlusNoArtifact'
+  try {
+    await ctx.workspaceRegistry.archiveSession(sessionId)
+  } catch (error) {
+    if (errorName(error) === 'WorkspaceUnknownSessionError') return
     throw error
   }
-  const dir = dirname(location.path)
-  await rm(location.path, { force: true })
-  await rm(join(dir, 'session.jsonl'), { force: true })
-  await rm(join(dir, 'session.jsonl.zstd'), { force: true })
-  try {
-    await rmdir(dir)
-  } catch {
-    // Session dir may still hold unrelated sidecar files.
+}
+
+async function deleteArtifact(ctx: HostContext, sessionId: string, headers: Map<string, SessionHeaderLike>) {
+  const header = await findHeader(ctx, sessionId, headers)
+  if (!header) return
+  const dir = await findSessionDir(ctx, header)
+  if (!dir) {
+    if (!persistenceRoot(ctx) && typeof ctx.sessionPersistence.locate !== 'function') {
+      throw namedError('SessionPlusNoArtifact', 'session persistence does not expose a per-session file')
+    }
+    return
   }
+  await rm(dir, { recursive: true, force: true })
 }
 
 function stillStored(ctx: HostContext, sessionId: string, byId: Map<string, SessionHeaderLike>) {
@@ -174,31 +261,24 @@ function stillStored(ctx: HostContext, sessionId: string, byId: Map<string, Sess
 async function logStillOnDisk(ctx: HostContext, sessionId: string, byId: Map<string, SessionHeaderLike>) {
   const header = byId.get(sessionId) ?? ctx.sessions.get(sessionId)?.header
   if (!header) return false
-  const location = ctx.sessionPersistence.locate(header)
-  if (!location) return Boolean(ctx.sessions.get(sessionId))
-  const dir = dirname(location.path)
-  for (const file of [location.path, join(dir, 'session.jsonl'), join(dir, 'session.jsonl.zstd')]) {
-    try {
-      await access(file)
-      return true
-    } catch {
-      // Missing encoding sibling; try the next candidate.
-    }
+  if (await findSessionDir(ctx, header)) return true
+  if (!persistenceRoot(ctx) && typeof ctx.sessionPersistence.locate !== 'function') {
+    return Boolean(ctx.sessions.get(sessionId))
   }
   return false
 }
 
 async function listArchived(ctx: HostContext): Promise<ArchivedRow[]> {
   const ids = ctx.workspaceRegistry.archivedSessionIds.map(String)
-  const headers = await ctx.sessionPersistence.list()
-  const byId = new Map(headers.map((header) => [String(header.id), header]))
+  const byId = await listedHeaders(ctx)
   const rows: ArchivedRow[] = []
   for (const id of ids) {
     if (!stillStored(ctx, id, byId) || !(await logStillOnDisk(ctx, id, byId))) continue
     const agent = ctx.agents.get(id)
+    const header = byId.get(id) ?? ctx.sessions.get(id)?.header
     rows.push({
       id,
-      cwd: byId.get(id)?.cwd ?? ctx.sessions.get(id)?.header.cwd,
+      cwd: header?.cwd,
       live: Boolean(ctx.sessions.get(id) || agent),
       running: agent?.status === 'running',
     })
@@ -206,18 +286,34 @@ async function listArchived(ctx: HostContext): Promise<ArchivedRow[]> {
   return rows
 }
 
+async function assertIdle(ctx: HostContext, sessionId: string) {
+  if (ctx.agents.get(sessionId)?.status === 'running') {
+    throw namedError('SessionPlusRunning', 'session is running; stop it before deleting')
+  }
+}
+
+async function removeStoredSession(
+  ctx: HostContext,
+  sessionId: string,
+  headers: Map<string, SessionHeaderLike>,
+) {
+  await hideFromGrouping(ctx, sessionId)
+  await disposeLiveAgent(ctx, sessionId)
+  await deleteArtifact(ctx, sessionId, headers)
+}
+
 async function deleteSession(ctx: HostContext, sessionId: string) {
-  const agent = ctx.agents.get(sessionId)
-  if (agent?.status === 'running') {
-    const error = new Error('session is running; stop it before deleting')
-    error.name = 'SessionPlusRunning'
-    throw error
+  const headers = await listedHeaders(ctx)
+  const descendants = subagentDescendants(headers.values(), sessionId)
+  await assertIdle(ctx, sessionId)
+  for (const childId of descendants) await assertIdle(ctx, childId)
+  // Children first. A fork that only shares parentSession is not in this list.
+  for (const childId of descendants) {
+    await removeStoredSession(ctx, childId, headers)
   }
   // Hide first and keep the tombstone in archivedSessionIds. Unarchiving after
   // rm() puts a file-less row back on the conversation list until restart.
-  await hideFromGrouping(ctx, sessionId)
-  await disposeLiveAgent(ctx, sessionId)
-  await deleteArtifact(ctx, sessionId)
+  await removeStoredSession(ctx, sessionId, headers)
 }
 
 export function apply(ctx: Context) {
@@ -263,10 +359,10 @@ export function apply(ctx: Context) {
             }
             sendJson(res, 404, { ok: false, error: 'not found' })
           } catch (error) {
-            const name = error instanceof Error ? error.name : ''
+            const name = errorName(error)
             const message = error instanceof Error ? error.message : String(error)
             logger.warn('dsh-session-plus route failed', error)
-            if (name === 'SessionPlusRunning') {
+            if (name === 'SessionPlusRunning' || name === 'WorkspaceActiveSessionError') {
               sendJson(res, 409, { ok: false, error: message, code: 'running' })
               return
             }
